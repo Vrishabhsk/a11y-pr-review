@@ -318,14 +318,15 @@ async function postResults(
     i => i.severity === 'CRITICAL' || i.severity === 'IMPORTANT'
   );
 
+  const filePatches = new Map<string, string>();
+  for (const file of filesAnalyzed) {
+    filePatches.set(file.filename, file.patch);
+  }
+
+  // If we have inline comments to post, create a review with ALL issues in the body
   if (criticalAndImportant.length > 0) {
     core.info(`Creating review with ${criticalAndImportant.length} inline comments`);
     
-    const filePatches = new Map<string, string>();
-    for (const file of filesAnalyzed) {
-      filePatches.set(file.filename, file.patch);
-    }
-
     try {
       await createReview(
         octokit,
@@ -337,17 +338,26 @@ async function postResults(
         allIssues,
         filePatches
       );
+      // Review created successfully - it contains all issues in the body
     } catch (error) {
       core.warning(`Failed to create inline review: ${error}`);
+      // Fall back to PR comment if review fails
+      if (allIssues.length > 0) {
+        const comment = formatIssueComment(allIssues, newIssues);
+        await createOrUpdateComment(octokit, owner, repo, prNumber, comment);
+      } else {
+        await createOrUpdateComment(octokit, owner, repo, prNumber, formatNoIssuesComment());
+      }
     }
-  }
-
-  // PR comment: ALL issues (complete summary)
-  if (allIssues.length > 0) {
-    const comment = formatIssueComment(allIssues, newIssues);
-    await createOrUpdateComment(octokit, owner, repo, prNumber, comment);
   } else {
-    await createOrUpdateComment(octokit, owner, repo, prNumber, formatNoIssuesComment());
+    // No inline comments - post PR comment with all issues
+    core.info('No inline comments to post, creating PR comment');
+    if (allIssues.length > 0) {
+      const comment = formatIssueComment(allIssues, newIssues);
+      await createOrUpdateComment(octokit, owner, repo, prNumber, comment);
+    } else {
+      await createOrUpdateComment(octokit, owner, repo, prNumber, formatNoIssuesComment());
+    }
   }
 
   await finalizeCheckRun(octokit, owner, repo, checkRunId, state, newIssues.length);

@@ -161,7 +161,8 @@ function formatReviewBody(allIssues: A11yIssue[]): string {
   const suggestions = allIssues.filter(i => i.severity === 'SUGGESTION');
   const nits = allIssues.filter(i => i.severity === 'NIT');
 
-  sections.push(`Found **${allIssues.length}** issue${allIssues.length === 1 ? '' : 's'} requiring attention:`);
+  // Summary counts
+  sections.push(`Found **${allIssues.length}** issue${allIssues.length === 1 ? '' : 's'}:`);
   sections.push('');
   if (critical.length > 0) sections.push(`- 🔴 **${critical.length}** Critical`);
   if (important.length > 0) sections.push(`- 🟠 **${important.length}** Important`);
@@ -170,9 +171,53 @@ function formatReviewBody(allIssues: A11yIssue[]): string {
 
   sections.push('');
   sections.push('---');
-  sections.push('Please review each inline suggestion and apply fixes as needed.');
+  sections.push('');
+
+  // Detailed issues by severity
+  if (critical.length > 0) {
+    sections.push('### 🔴 Critical Issues', '');
+    for (const issue of critical) {
+      sections.push(formatIssueInBody(issue));
+    }
+  }
+
+  if (important.length > 0) {
+    sections.push('### 🟠 Important Issues', '');
+    for (const issue of important) {
+      sections.push(formatIssueInBody(issue));
+    }
+  }
+
+  if (suggestions.length > 0) {
+    sections.push('### 🟡 Suggestions', '');
+    for (const issue of suggestions) {
+      sections.push(formatIssueInBody(issue));
+    }
+  }
+
+  if (nits.length > 0) {
+    sections.push('### ⚪ Minor Improvements', '');
+    for (const issue of nits) {
+      sections.push(formatIssueInBody(issue));
+    }
+  }
+
+  sections.push('---');
+  sections.push('*Review each inline suggestion and apply fixes as needed. 🤖*');
 
   return sections.join('\n');
+}
+
+function formatIssueInBody(issue: A11yIssue): string {
+  const lines: string[] = [];
+  const location = issue.file + (issue.line ? `:${issue.line}` : '');
+  lines.push(`**${location}** - ${issue.title || issue.description}`);
+  lines.push(`- WCAG ${issue.wcag_criterion} (Level ${issue.wcag_level})`);
+  if (issue.suggestion) {
+    lines.push(`- **Fix:** ${issue.suggestion}`);
+  }
+  lines.push('');
+  return lines.join('\n');
 }
 
 function findLineInPatch(patch: string, targetLine: number): number | null {

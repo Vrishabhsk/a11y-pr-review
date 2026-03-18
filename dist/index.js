@@ -31551,7 +31551,8 @@ function formatReviewBody(allIssues) {
     const important = allIssues.filter(i => i.severity === 'IMPORTANT');
     const suggestions = allIssues.filter(i => i.severity === 'SUGGESTION');
     const nits = allIssues.filter(i => i.severity === 'NIT');
-    sections.push(`Found **${allIssues.length}** issue${allIssues.length === 1 ? '' : 's'} requiring attention:`);
+    // Summary counts
+    sections.push(`Found **${allIssues.length}** issue${allIssues.length === 1 ? '' : 's'}:`);
     sections.push('');
     if (critical.length > 0)
         sections.push(`- 🔴 **${critical.length}** Critical`);
@@ -31563,8 +31564,46 @@ function formatReviewBody(allIssues) {
         sections.push(`- ⚪ **${nits.length}** Minor`);
     sections.push('');
     sections.push('---');
-    sections.push('Please review each inline suggestion and apply fixes as needed.');
+    sections.push('');
+    // Detailed issues by severity
+    if (critical.length > 0) {
+        sections.push('### 🔴 Critical Issues', '');
+        for (const issue of critical) {
+            sections.push(formatIssueInBody(issue));
+        }
+    }
+    if (important.length > 0) {
+        sections.push('### 🟠 Important Issues', '');
+        for (const issue of important) {
+            sections.push(formatIssueInBody(issue));
+        }
+    }
+    if (suggestions.length > 0) {
+        sections.push('### 🟡 Suggestions', '');
+        for (const issue of suggestions) {
+            sections.push(formatIssueInBody(issue));
+        }
+    }
+    if (nits.length > 0) {
+        sections.push('### ⚪ Minor Improvements', '');
+        for (const issue of nits) {
+            sections.push(formatIssueInBody(issue));
+        }
+    }
+    sections.push('---');
+    sections.push('*Review each inline suggestion and apply fixes as needed. 🤖*');
     return sections.join('\n');
+}
+function formatIssueInBody(issue) {
+    const lines = [];
+    const location = issue.file + (issue.line ? `:${issue.line}` : '');
+    lines.push(`**${location}** - ${issue.title || issue.description}`);
+    lines.push(`- WCAG ${issue.wcag_criterion} (Level ${issue.wcag_level})`);
+    if (issue.suggestion) {
+        lines.push(`- **Fix:** ${issue.suggestion}`);
+    }
+    lines.push('');
+    return lines.join('\n');
 }
 function findLineInPatch(patch, targetLine) {
     const lines = patch.split('\n');
@@ -31982,26 +32021,39 @@ async function run() {
 }
 async function postResults(octokit, owner, repo, prNumber, headSha, allIssues, newIssues, filesAnalyzed, checkRunId, state) {
     const criticalAndImportant = newIssues.filter(i => i.severity === 'CRITICAL' || i.severity === 'IMPORTANT');
+    const filePatches = new Map();
+    for (const file of filesAnalyzed) {
+        filePatches.set(file.filename, file.patch);
+    }
+    // If we have inline comments to post, create a review with ALL issues in the body
     if (criticalAndImportant.length > 0) {
         core.info(`Creating review with ${criticalAndImportant.length} inline comments`);
-        const filePatches = new Map();
-        for (const file of filesAnalyzed) {
-            filePatches.set(file.filename, file.patch);
-        }
         try {
             await (0, client_1.createReview)(octokit, owner, repo, prNumber, headSha, criticalAndImportant, allIssues, filePatches);
+            // Review created successfully - it contains all issues in the body
         }
         catch (error) {
             core.warning(`Failed to create inline review: ${error}`);
+            // Fall back to PR comment if review fails
+            if (allIssues.length > 0) {
+                const comment = (0, comments_1.formatIssueComment)(allIssues, newIssues);
+                await (0, comments_1.createOrUpdateComment)(octokit, owner, repo, prNumber, comment);
+            }
+            else {
+                await (0, comments_1.createOrUpdateComment)(octokit, owner, repo, prNumber, (0, comments_1.formatNoIssuesComment)());
+            }
         }
     }
-    // PR comment: ALL issues (complete summary)
-    if (allIssues.length > 0) {
-        const comment = (0, comments_1.formatIssueComment)(allIssues, newIssues);
-        await (0, comments_1.createOrUpdateComment)(octokit, owner, repo, prNumber, comment);
-    }
     else {
-        await (0, comments_1.createOrUpdateComment)(octokit, owner, repo, prNumber, (0, comments_1.formatNoIssuesComment)());
+        // No inline comments - post PR comment with all issues
+        core.info('No inline comments to post, creating PR comment');
+        if (allIssues.length > 0) {
+            const comment = (0, comments_1.formatIssueComment)(allIssues, newIssues);
+            await (0, comments_1.createOrUpdateComment)(octokit, owner, repo, prNumber, comment);
+        }
+        else {
+            await (0, comments_1.createOrUpdateComment)(octokit, owner, repo, prNumber, (0, comments_1.formatNoIssuesComment)());
+        }
     }
     await (0, check_run_1.finalizeCheckRun)(octokit, owner, repo, checkRunId, state, newIssues.length);
 }
@@ -32267,29 +32319,10 @@ exports.OllamaClient = OllamaClient;
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.isAccessibilityRelevant = isAccessibilityRelevant;
 exports.formatDiffForAnalysis = formatDiffForAnalysis;
-const ACCESSIBILITY_EXTENSIONS = [
-    '.tsx', '.jsx', '.ts', '.js', '.vue', '.svelte',
-    '.html', '.htm', '.css', '.scss', '.sass', '.less',
-    '.astro', '.php', '.erb', '.haml', '.handlebars', '.hbs'
-];
-const ACCESSIBILITY_PATTERNS = [
-    'component', 'page', 'view', 'template', 'layout', 'screen', 'form', 'button', 'input', 'modal', 'dialog', 'menu', 'nav', 'accessibility', 'a11y', 'aria'
-];
-function isAccessibilityRelevant(filename) {
-    const lower = filename.toLowerCase();
-    if (ACCESSIBILITY_EXTENSIONS.some(ext => lower.endsWith(ext))) {
-        return true;
-    }
-    if (ACCESSIBILITY_PATTERNS.some(p => lower.includes(p))) {
-        return true;
-    }
-    if (lower.includes('test') || lower.includes('spec') || lower.includes('.test.') || lower.includes('.spec.')) {
-        return false;
-    }
-    if (lower.includes('node_modules') || lower.includes('.min.') || lower.includes('.d.ts')) {
-        return false;
-    }
-    return false;
+// Analyze ALL files - no filtering based on file type
+// Accessibility issues can exist in any file type, not just frontend code
+function isAccessibilityRelevant(_filename) {
+    return true;
 }
 function formatDiffForAnalysis(files) {
     const lines = [];
@@ -32630,22 +32663,69 @@ async function createCheckRun(octokit, owner, repo, headSha, prNumber) {
 async function getPreviousCheckRunForPR(octokit, owner, repo, prNumber, headSha) {
     const checkRunName = (0, types_1.getCheckRunName)(prNumber);
     try {
-        const { data: checkRuns } = await octokit.rest.checks.listForRef({
+        // First try to find check run on current head SHA
+        let checkRuns = await octokit.rest.checks.listForRef({
             owner,
             repo,
             ref: headSha,
             per_page: 100,
         });
-        const matchingRun = checkRuns.check_runs.find((run) => run.name === checkRunName && run.status === 'completed');
-        if (!matchingRun)
+        let matchingRun = checkRuns.data.check_runs
+            .filter(run => run.name === checkRunName && run.status === 'completed')
+            .sort((a, b) => new Date(b.completed_at || 0).getTime() - new Date(a.completed_at || 0).getTime())[0];
+        // If not found on current SHA, we need to look at the PR's commit history
+        if (!matchingRun) {
+            core.info('No check run found on current SHA, searching in PR history...');
+            // Get the PR to find its base
+            const { data: pr } = await octokit.rest.pulls.get({
+                owner,
+                repo,
+                pull_number: prNumber,
+            });
+            // List commits in the PR
+            const { data: commits } = await octokit.rest.pulls.listCommits({
+                owner,
+                repo,
+                pull_number: prNumber,
+                per_page: 100,
+            });
+            // Search for check runs on previous commits
+            for (const commit of commits.reverse()) { // reverse to start from oldest
+                try {
+                    const refCheckRuns = await octokit.rest.checks.listForRef({
+                        owner,
+                        repo,
+                        ref: commit.sha,
+                        per_page: 100,
+                    });
+                    const run = refCheckRuns.data.check_runs
+                        .filter(r => r.name === checkRunName && r.status === 'completed')
+                        .sort((a, b) => new Date(b.completed_at || 0).getTime() - new Date(a.completed_at || 0).getTime())[0];
+                    if (run) {
+                        matchingRun = run;
+                        core.info(`Found previous check run on commit ${commit.sha}`);
+                        break;
+                    }
+                }
+                catch {
+                    // Continue to next commit if this one fails
+                }
+            }
+        }
+        if (!matchingRun) {
+            core.info('No previous check run found');
             return null;
-        if (!matchingRun.output?.text)
+        }
+        if (!matchingRun.output?.text) {
+            core.info('Previous check run has no state');
             return null;
+        }
         const state = deserializeState(matchingRun.output.text);
         if (state.version !== STATE_VERSION) {
             core.info('State version mismatch, treating as first run');
             return null;
         }
+        core.info(`Found previous check run ${matchingRun.id} with SHA ${state.lastAnalyzedHeadSha}`);
         return {
             checkRunId: matchingRun.id,
             state,
@@ -32711,9 +32791,11 @@ function createEmptyState(prNumber, headSha) {
 }
 function updateStateWithNewIssues(previousState, newIssuesByFile, filesReanalyzed, newHeadSha) {
     const newIssuesByFileCopy = { ...previousState.issuesByFile };
+    // Remove issues for files that were re-analyzed
     for (const file of filesReanalyzed) {
         delete newIssuesByFileCopy[file];
     }
+    // Add new/updated issues
     for (const [file, issues] of Object.entries(newIssuesByFile)) {
         newIssuesByFileCopy[file] = issues;
     }

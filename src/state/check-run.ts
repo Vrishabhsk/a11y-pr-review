@@ -43,20 +43,71 @@ export async function getPreviousCheckRunForPR(
   const checkRunName = getCheckRunName(prNumber);
   
   try {
-    const { data: checkRuns } = await octokit.rest.checks.listForRef({
+    // First try to find check run on current head SHA
+    let checkRuns = await octokit.rest.checks.listForRef({
       owner,
       repo,
       ref: headSha,
       per_page: 100,
     });
 
-    const matchingRun = checkRuns.check_runs.find(
-      (run) => run.name === checkRunName && run.status === 'completed'
-    );
+    let matchingRun = checkRuns.data.check_runs
+      .filter(run => run.name === checkRunName && run.status === 'completed')
+      .sort((a, b) => new Date(b.completed_at || 0).getTime() - new Date(a.completed_at || 0).getTime())[0];
 
-    if (!matchingRun) return null;
+    // If not found on current SHA, we need to look at the PR's commit history
+    if (!matchingRun) {
+      core.info('No check run found on current SHA, searching in PR history...');
+      
+      // Get the PR to find its base
+      const { data: pr } = await octokit.rest.pulls.get({
+        owner,
+        repo,
+        pull_number: prNumber,
+      });
 
-    if (!matchingRun.output?.text) return null;
+      // List commits in the PR
+      const { data: commits } = await octokit.rest.pulls.listCommits({
+        owner,
+        repo,
+        pull_number: prNumber,
+        per_page: 100,
+      });
+
+      // Search for check runs on previous commits
+      for (const commit of commits.reverse()) { // reverse to start from oldest
+        try {
+          const refCheckRuns = await octokit.rest.checks.listForRef({
+            owner,
+            repo,
+            ref: commit.sha,
+            per_page: 100,
+          });
+
+          const run = refCheckRuns.data.check_runs
+            .filter(r => r.name === checkRunName && r.status === 'completed')
+            .sort((a, b) => new Date(b.completed_at || 0).getTime() - new Date(a.completed_at || 0).getTime())[0];
+
+          if (run) {
+            matchingRun = run;
+            core.info(`Found previous check run on commit ${commit.sha}`);
+            break;
+          }
+        } catch {
+          // Continue to next commit if this one fails
+        }
+      }
+    }
+
+    if (!matchingRun) {
+      core.info('No previous check run found');
+      return null;
+    }
+
+    if (!matchingRun.output?.text) {
+      core.info('Previous check run has no state');
+      return null;
+    }
 
     const state = deserializeState(matchingRun.output.text);
     
@@ -64,6 +115,8 @@ export async function getPreviousCheckRunForPR(
       core.info('State version mismatch, treating as first run');
       return null;
     }
+
+    core.info(`Found previous check run ${matchingRun.id} with SHA ${state.lastAnalyzedHeadSha}`);
 
     return {
       checkRunId: matchingRun.id,
@@ -161,10 +214,12 @@ export function updateStateWithNewIssues(
 ): CheckRunState {
   const newIssuesByFileCopy = { ...previousState.issuesByFile };
   
+  // Remove issues for files that were re-analyzed
   for (const file of filesReanalyzed) {
     delete newIssuesByFileCopy[file];
   }
   
+  // Add new/updated issues
   for (const [file, issues] of Object.entries(newIssuesByFile)) {
     newIssuesByFileCopy[file] = issues;
   }

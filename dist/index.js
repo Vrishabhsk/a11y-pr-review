@@ -31509,6 +31509,10 @@ async function run() {
         const issues = result.issues;
         const summary = result.summary;
         core.info(`Found ${issues.length} accessibility issues`);
+        // Debug: log raw severities
+        for (const issue of issues) {
+            core.debug(`Issue: ${issue.file}:${issue.line} - severity="${issue.severity}" - ${issue.title}`);
+        }
         if (issues.length === 0) {
             await postComment(octokit, owner, repo, prNumber, formatNoIssuesComment(summary));
             core.setOutput('issues-found', '0');
@@ -31524,6 +31528,7 @@ async function run() {
         const suggestionCount = limitedIssues.filter(i => i.severity === 'SUGGESTION').length;
         const nitCount = limitedIssues.filter(i => i.severity === 'NIT').length;
         core.info(`Critical: ${criticalCount}, Important: ${importantCount}, Suggestions: ${suggestionCount}, Nits: ${nitCount}`);
+        core.info(`Critical+Important issues: ${criticalAndImportant.length}, Suggestion+Nit issues: ${suggestionsAndNits.length}`);
         const filePatches = new Map();
         for (const file of relevantFiles) {
             filePatches.set(file.filename, file.patch);
@@ -31808,16 +31813,22 @@ class GeminiClient {
             const result = await genModel.generateContent(fullPrompt);
             const text = result.response.text();
             const parsed = JSON.parse(text);
-            const issues = (parsed.issues || []).map((issue) => ({
-                file: String(issue.file || ''),
-                line: issue.line ? Number(issue.line) : null,
-                wcag_criterion: String(issue.wcag_criterion || ''),
-                wcag_level: String(issue.wcag_level || 'A'),
-                severity: issue.severity || 'SUGGESTION',
-                title: String(issue.title || ''),
-                description: String(issue.description || ''),
-                suggestion: String(issue.suggestion || ''),
-            }));
+            const issues = (parsed.issues || []).map((issue) => {
+                const rawSeverity = String(issue.severity || 'suggestion').toUpperCase();
+                const severity = rawSeverity === 'CRITICAL' ? 'CRITICAL' :
+                    rawSeverity === 'IMPORTANT' ? 'IMPORTANT' :
+                        rawSeverity === 'NIT' ? 'NIT' : 'SUGGESTION';
+                return {
+                    file: String(issue.file || ''),
+                    line: issue.line ? Number(issue.line) : null,
+                    wcag_criterion: String(issue.wcag_criterion || ''),
+                    wcag_level: String(issue.wcag_level || 'A'),
+                    severity,
+                    title: String(issue.title || ''),
+                    description: String(issue.description || ''),
+                    suggestion: String(issue.suggestion || ''),
+                };
+            });
             return {
                 issues,
                 summary: String(parsed.summary || 'Accessibility review completed.'),
@@ -31881,16 +31892,22 @@ class OllamaClient {
             else {
                 parsed = JSON.parse(content);
             }
-            const issues = (parsed.issues || []).map((issue) => ({
-                file: String(issue.file || ''),
-                line: issue.line ? Number(issue.line) : null,
-                wcag_criterion: String(issue.wcag_criterion || ''),
-                wcag_level: String(issue.wcag_level || 'A'),
-                severity: issue.severity || 'SUGGESTION',
-                title: String(issue.title || ''),
-                description: String(issue.description || ''),
-                suggestion: String(issue.suggestion || ''),
-            }));
+            const issues = (parsed.issues || []).map((issue) => {
+                const rawSeverity = String(issue.severity || 'suggestion').toUpperCase();
+                const severity = rawSeverity === 'CRITICAL' ? 'CRITICAL' :
+                    rawSeverity === 'IMPORTANT' ? 'IMPORTANT' :
+                        rawSeverity === 'NIT' ? 'NIT' : 'SUGGESTION';
+                return {
+                    file: String(issue.file || ''),
+                    line: issue.line ? Number(issue.line) : null,
+                    wcag_criterion: String(issue.wcag_criterion || ''),
+                    wcag_level: String(issue.wcag_level || 'A'),
+                    severity,
+                    title: String(issue.title || ''),
+                    description: String(issue.description || ''),
+                    suggestion: String(issue.suggestion || ''),
+                };
+            });
             return {
                 issues,
                 summary: String(parsed.summary || 'Accessibility review completed.'),

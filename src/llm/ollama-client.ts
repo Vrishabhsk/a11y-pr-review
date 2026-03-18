@@ -64,16 +64,24 @@ export class OllamaClient {
         parsed = JSON.parse(content);
       }
 
-      const issues: A11yIssue[] = (parsed.issues as Array<Record<string, unknown>> || []).map((issue) => ({
-        file: String(issue.file || ''),
-        line: issue.line ? Number(issue.line) : null,
-        wcag_criterion: String(issue.wcag_criterion || ''),
-        wcag_level: String(issue.wcag_level || 'A'),
-        severity: (issue.severity as A11yIssue['severity']) || 'SUGGESTION',
-        title: String(issue.title || ''),
-        description: String(issue.description || ''),
-        suggestion: String(issue.suggestion || ''),
-      }));
+      const issues: A11yIssue[] = (parsed.issues as Array<Record<string, unknown>> || []).map((issue) => {
+        const rawSeverity = String(issue.severity || 'suggestion').toUpperCase();
+        const severity: A11yIssue['severity'] = 
+          rawSeverity === 'CRITICAL' ? 'CRITICAL' :
+          rawSeverity === 'IMPORTANT' ? 'IMPORTANT' :
+          rawSeverity === 'NIT' ? 'NIT' : 'SUGGESTION';
+        
+        return {
+          file: String(issue.file || ''),
+          line: issue.line ? Number(issue.line) : null,
+          wcag_criterion: String(issue.wcag_criterion || ''),
+          wcag_level: String(issue.wcag_level || 'A'),
+          severity,
+          title: String(issue.title || ''),
+          description: String(issue.description || ''),
+          suggestion: String(issue.suggestion || ''),
+        };
+      });
 
       return {
         issues,

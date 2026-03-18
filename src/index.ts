@@ -115,6 +115,11 @@ async function run(): Promise<void> {
     const summary = result.summary;
 
     core.info(`Found ${issues.length} accessibility issues`);
+    
+    // Debug: log raw severities
+    for (const issue of issues) {
+      core.debug(`Issue: ${issue.file}:${issue.line} - severity="${issue.severity}" - ${issue.title}`);
+    }
 
     if (issues.length === 0) {
       await postComment(octokit, owner, repo, prNumber, formatNoIssuesComment(summary));
@@ -139,6 +144,7 @@ async function run(): Promise<void> {
     const nitCount = limitedIssues.filter(i => i.severity === 'NIT').length;
 
     core.info(`Critical: ${criticalCount}, Important: ${importantCount}, Suggestions: ${suggestionCount}, Nits: ${nitCount}`);
+    core.info(`Critical+Important issues: ${criticalAndImportant.length}, Suggestion+Nit issues: ${suggestionsAndNits.length}`);
 
     const filePatches = new Map<string, string>();
     for (const file of relevantFiles) {

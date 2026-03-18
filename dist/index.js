@@ -31506,8 +31506,10 @@ async function getFilesChangedBetween(octokit, owner, repo, baseSha, headSha) {
     return changedFiles;
 }
 async function createReview(octokit, owner, repo, prNumber, headSha, issuesForInlineComments, allIssues, filePatches) {
+    // Inline comments for CRITICAL and IMPORTANT (both need actionable suggestions)
+    const criticalAndImportant = issuesForInlineComments.filter(i => i.severity === 'CRITICAL' || i.severity === 'IMPORTANT');
     const comments = [];
-    for (const issue of issuesForInlineComments) {
+    for (const issue of criticalAndImportant) {
         if (!issue.line || issue.line < 1)
             continue;
         if (!issue.file)
@@ -31551,59 +31553,67 @@ function formatReviewBody(allIssues) {
     const important = allIssues.filter(i => i.severity === 'IMPORTANT');
     const suggestions = allIssues.filter(i => i.severity === 'SUGGESTION');
     const nits = allIssues.filter(i => i.severity === 'NIT');
-    // Summary counts
-    sections.push(`Found **${allIssues.length}** issue${allIssues.length === 1 ? '' : 's'}:`);
-    sections.push('');
+    // Minimal summary
+    const parts = [];
     if (critical.length > 0)
-        sections.push(`- 🔴 **${critical.length}** Critical`);
+        parts.push(`🔴 ${critical.length} critical`);
     if (important.length > 0)
-        sections.push(`- 🟠 **${important.length}** Important`);
+        parts.push(`🟠 ${important.length} important`);
     if (suggestions.length > 0)
-        sections.push(`- 🟡 **${suggestions.length}** Suggestions`);
+        parts.push(`🟡 ${suggestions.length} suggestions`);
     if (nits.length > 0)
-        sections.push(`- ⚪ **${nits.length}** Minor`);
+        parts.push(`⚪ ${nits.length} minor`);
+    sections.push(`**${allIssues.length} issue${allIssues.length === 1 ? '' : 's'}:** ${parts.join(' • ')}`);
     sections.push('');
-    sections.push('---');
-    sections.push('');
-    // Detailed issues by severity
+    // CRITICAL - full details with suggestions
     if (critical.length > 0) {
-        sections.push('### 🔴 Critical Issues', '');
+        sections.push('### 🔴 Critical');
         for (const issue of critical) {
-            sections.push(formatIssueInBody(issue));
+            sections.push(formatIssueDetailed(issue));
         }
     }
+    // IMPORTANT - full details with suggestions
     if (important.length > 0) {
-        sections.push('### 🟠 Important Issues', '');
+        sections.push('### 🟠 Important');
         for (const issue of important) {
-            sections.push(formatIssueInBody(issue));
+            sections.push(formatIssueDetailed(issue));
         }
     }
+    // SUGGESTIONS - compact format
     if (suggestions.length > 0) {
-        sections.push('### 🟡 Suggestions', '');
+        sections.push('### 🟡 Suggestions');
         for (const issue of suggestions) {
-            sections.push(formatIssueInBody(issue));
+            sections.push(formatIssueCompact(issue));
         }
     }
+    // NITS - one-liner
     if (nits.length > 0) {
-        sections.push('### ⚪ Minor Improvements', '');
+        sections.push('### ⚪ Minor');
         for (const issue of nits) {
-            sections.push(formatIssueInBody(issue));
+            sections.push(formatIssueOneLiner(issue));
         }
     }
     sections.push('---');
-    sections.push('*Review each inline suggestion and apply fixes as needed. 🤖*');
+    sections.push('*🤖 Click inline suggestions to apply fixes*');
     return sections.join('\n');
 }
-function formatIssueInBody(issue) {
-    const lines = [];
+function formatIssueDetailed(issue) {
     const location = issue.file + (issue.line ? `:${issue.line}` : '');
-    lines.push(`**${location}** - ${issue.title || issue.description}`);
-    lines.push(`- WCAG ${issue.wcag_criterion} (Level ${issue.wcag_level})`);
+    const lines = [`**${location}** — ${issue.title || issue.description}`];
+    lines.push(`WCAG ${issue.wcag_criterion} (Level ${issue.wcag_level})`);
     if (issue.suggestion) {
-        lines.push(`- **Fix:** ${issue.suggestion}`);
+        lines.push(`→ \`${issue.suggestion}\``);
     }
     lines.push('');
     return lines.join('\n');
+}
+function formatIssueCompact(issue) {
+    const location = issue.file + (issue.line ? `:${issue.line}` : '');
+    return `- **${location}** — ${issue.title || issue.description} *(WCAG ${issue.wcag_criterion})*`;
+}
+function formatIssueOneLiner(issue) {
+    const location = issue.file + (issue.line ? `:${issue.line}` : '');
+    return `- ${location}: ${issue.title || issue.description}`;
 }
 function findLineInPatch(patch, targetLine) {
     const lines = patch.split('\n');
@@ -31986,30 +31996,31 @@ async function run() {
             await postResults(octokit, owner, repo, prNumber, prInfo.headSha, allIssues, newIssues, relevantChangedFiles, checkRunId, state);
         }
         const totalIssues = Math.min(allIssues.length, types_1.MAX_ISSUES);
+        const criticalAndImportantCount = allIssues.filter(i => i.severity === 'CRITICAL' || i.severity === 'IMPORTANT').length;
+        const suggestionAndNitCount = totalIssues - criticalAndImportantCount;
         core.setOutput('issues-found', String(totalIssues));
-        core.info(`Total issues: ${totalIssues}, New issues: ${newIssues.length}`);
-        if (totalIssues > 0 && failOnIssues) {
+        core.info(`Total issues: ${totalIssues} (${criticalAndImportantCount} critical/important, ${suggestionAndNitCount} suggestions/nits)`);
+        // Only fail on CRITICAL and IMPORTANT issues, not on SUGGESTION/NIT
+        if (criticalAndImportantCount > 0 && failOnIssues) {
             const criticalCount = allIssues.filter(i => i.severity === 'CRITICAL').length;
             const importantCount = allIssues.filter(i => i.severity === 'IMPORTANT').length;
-            const suggestionCount = allIssues.filter(i => i.severity === 'SUGGESTION').length;
-            const nitCount = allIssues.filter(i => i.severity === 'NIT').length;
-            let message = `Found ${totalIssues} accessibility issue${totalIssues === 1 ? '' : 's'}`;
-            if (newIssues.length > 0 && newIssues.length !== totalIssues) {
-                message += ` (${newIssues.length} new)`;
-            }
-            message += ':';
+            let message = `Found ${criticalAndImportantCount} blocking issue${criticalAndImportantCount === 1 ? '' : 's'}`;
             if (criticalCount > 0)
-                message += ` ${criticalCount} critical`;
+                message += ` (${criticalCount} critical`;
             if (importantCount > 0)
-                message += ` ${importantCount} important`;
-            if (suggestionCount > 0)
-                message += ` ${suggestionCount} suggestion${suggestionCount > 1 ? 's' : ''}`;
-            if (nitCount > 0)
-                message += ` ${nitCount} nit${nitCount > 1 ? 's' : ''}`;
+                message += `${criticalCount > 0 ? ', ' : '('}${importantCount} important)`;
+            if (suggestionAndNitCount > 0) {
+                message += `. Plus ${suggestionAndNitCount} suggestion${suggestionAndNitCount === 1 ? '' : 's'}.`;
+            }
             core.setFailed(message);
             return;
         }
-        core.info('Review complete!');
+        if (suggestionAndNitCount > 0) {
+            core.info(`✓ No blocking issues. ${suggestionAndNitCount} suggestion${suggestionAndNitCount === 1 ? '' : 's'} available for review.`);
+        }
+        else {
+            core.info('✓ Review complete - no issues found');
+        }
     }
     catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -32020,12 +32031,13 @@ async function run() {
     }
 }
 async function postResults(octokit, owner, repo, prNumber, headSha, allIssues, newIssues, filesAnalyzed, checkRunId, state) {
+    // Only create inline comments for CRITICAL and IMPORTANT
     const criticalAndImportant = newIssues.filter(i => i.severity === 'CRITICAL' || i.severity === 'IMPORTANT');
     const filePatches = new Map();
     for (const file of filesAnalyzed) {
         filePatches.set(file.filename, file.patch);
     }
-    // If we have inline comments to post, create a review with ALL issues in the body
+    // If we have CRITICAL/IMPORTANT issues, create review with inline comments
     if (criticalAndImportant.length > 0) {
         core.info(`Creating review with ${criticalAndImportant.length} inline comments`);
         try {
@@ -32045,8 +32057,8 @@ async function postResults(octokit, owner, repo, prNumber, headSha, allIssues, n
         }
     }
     else {
-        // No inline comments - post PR comment with all issues
-        core.info('No inline comments to post, creating PR comment');
+        // No CRITICAL/IMPORTANT - just post a comment with all issues
+        core.info('No CRITICAL/IMPORTANT issues, creating PR comment');
         if (allIssues.length > 0) {
             const comment = (0, comments_1.formatIssueComment)(allIssues, newIssues);
             await (0, comments_1.createOrUpdateComment)(octokit, owner, repo, prNumber, comment);

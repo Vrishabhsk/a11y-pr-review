@@ -105,13 +105,18 @@ export async function createReview(
   allIssues: A11yIssue[],
   filePatches: Map<string, string>
 ): Promise<number> {
+  // Inline comments for CRITICAL and IMPORTANT (both need actionable suggestions)
+  const criticalAndImportant = issuesForInlineComments.filter(
+    i => i.severity === 'CRITICAL' || i.severity === 'IMPORTANT'
+  );
+  
   const comments: Array<{
     path: string;
     line: number;
     body: string;
   }> = [];
 
-  for (const issue of issuesForInlineComments) {
+  for (const issue of criticalAndImportant) {
     if (!issue.line || issue.line < 1) continue;
     if (!issue.file) continue;
 
@@ -161,63 +166,72 @@ function formatReviewBody(allIssues: A11yIssue[]): string {
   const suggestions = allIssues.filter(i => i.severity === 'SUGGESTION');
   const nits = allIssues.filter(i => i.severity === 'NIT');
 
-  // Summary counts
-  sections.push(`Found **${allIssues.length}** issue${allIssues.length === 1 ? '' : 's'}:`);
-  sections.push('');
-  if (critical.length > 0) sections.push(`- 🔴 **${critical.length}** Critical`);
-  if (important.length > 0) sections.push(`- 🟠 **${important.length}** Important`);
-  if (suggestions.length > 0) sections.push(`- 🟡 **${suggestions.length}** Suggestions`);
-  if (nits.length > 0) sections.push(`- ⚪ **${nits.length}** Minor`);
-
-  sections.push('');
-  sections.push('---');
+  // Minimal summary
+  const parts: string[] = [];
+  if (critical.length > 0) parts.push(`🔴 ${critical.length} critical`);
+  if (important.length > 0) parts.push(`🟠 ${important.length} important`);
+  if (suggestions.length > 0) parts.push(`🟡 ${suggestions.length} suggestions`);
+  if (nits.length > 0) parts.push(`⚪ ${nits.length} minor`);
+  sections.push(`**${allIssues.length} issue${allIssues.length === 1 ? '' : 's'}:** ${parts.join(' • ')}`);
   sections.push('');
 
-  // Detailed issues by severity
+  // CRITICAL - full details with suggestions
   if (critical.length > 0) {
-    sections.push('### 🔴 Critical Issues', '');
+    sections.push('### 🔴 Critical');
     for (const issue of critical) {
-      sections.push(formatIssueInBody(issue));
+      sections.push(formatIssueDetailed(issue));
     }
   }
 
+  // IMPORTANT - full details with suggestions
   if (important.length > 0) {
-    sections.push('### 🟠 Important Issues', '');
+    sections.push('### 🟠 Important');
     for (const issue of important) {
-      sections.push(formatIssueInBody(issue));
+      sections.push(formatIssueDetailed(issue));
     }
   }
 
+  // SUGGESTIONS - compact format
   if (suggestions.length > 0) {
-    sections.push('### 🟡 Suggestions', '');
+    sections.push('### 🟡 Suggestions');
     for (const issue of suggestions) {
-      sections.push(formatIssueInBody(issue));
+      sections.push(formatIssueCompact(issue));
     }
   }
 
+  // NITS - one-liner
   if (nits.length > 0) {
-    sections.push('### ⚪ Minor Improvements', '');
+    sections.push('### ⚪ Minor');
     for (const issue of nits) {
-      sections.push(formatIssueInBody(issue));
+      sections.push(formatIssueOneLiner(issue));
     }
   }
 
   sections.push('---');
-  sections.push('*Review each inline suggestion and apply fixes as needed. 🤖*');
+  sections.push('*🤖 Click inline suggestions to apply fixes*');
 
   return sections.join('\n');
 }
 
-function formatIssueInBody(issue: A11yIssue): string {
-  const lines: string[] = [];
+function formatIssueDetailed(issue: A11yIssue): string {
   const location = issue.file + (issue.line ? `:${issue.line}` : '');
-  lines.push(`**${location}** - ${issue.title || issue.description}`);
-  lines.push(`- WCAG ${issue.wcag_criterion} (Level ${issue.wcag_level})`);
+  const lines: string[] = [`**${location}** — ${issue.title || issue.description}`];
+  lines.push(`WCAG ${issue.wcag_criterion} (Level ${issue.wcag_level})`);
   if (issue.suggestion) {
-    lines.push(`- **Fix:** ${issue.suggestion}`);
+    lines.push(`→ \`${issue.suggestion}\``);
   }
   lines.push('');
   return lines.join('\n');
+}
+
+function formatIssueCompact(issue: A11yIssue): string {
+  const location = issue.file + (issue.line ? `:${issue.line}` : '');
+  return `- **${location}** — ${issue.title || issue.description} *(WCAG ${issue.wcag_criterion})*`;
+}
+
+function formatIssueOneLiner(issue: A11yIssue): string {
+  const location = issue.file + (issue.line ? `:${issue.line}` : '');
+  return `- ${location}: ${issue.title || issue.description}`;
 }
 
 function findLineInPatch(patch: string, targetLine: number): number | null {

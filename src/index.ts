@@ -268,30 +268,36 @@ async function run(): Promise<void> {
     }
 
     const totalIssues = Math.min(allIssues.length, MAX_ISSUES);
-    core.setOutput('issues-found', String(totalIssues));
-    core.info(`Total issues: ${totalIssues}, New issues: ${newIssues.length}`);
+    const criticalAndImportantCount = allIssues.filter(
+      i => i.severity === 'CRITICAL' || i.severity === 'IMPORTANT'
+    ).length;
+    const suggestionAndNitCount = totalIssues - criticalAndImportantCount;
 
-    if (totalIssues > 0 && failOnIssues) {
+    core.setOutput('issues-found', String(totalIssues));
+    core.info(`Total issues: ${totalIssues} (${criticalAndImportantCount} critical/important, ${suggestionAndNitCount} suggestions/nits)`);
+
+    // Only fail on CRITICAL and IMPORTANT issues, not on SUGGESTION/NIT
+    if (criticalAndImportantCount > 0 && failOnIssues) {
       const criticalCount = allIssues.filter(i => i.severity === 'CRITICAL').length;
       const importantCount = allIssues.filter(i => i.severity === 'IMPORTANT').length;
-      const suggestionCount = allIssues.filter(i => i.severity === 'SUGGESTION').length;
-      const nitCount = allIssues.filter(i => i.severity === 'NIT').length;
 
-      let message = `Found ${totalIssues} accessibility issue${totalIssues === 1 ? '' : 's'}`;
-      if (newIssues.length > 0 && newIssues.length !== totalIssues) {
-        message += ` (${newIssues.length} new)`;
+      let message = `Found ${criticalAndImportantCount} blocking issue${criticalAndImportantCount === 1 ? '' : 's'}`;
+      if (criticalCount > 0) message += ` (${criticalCount} critical`;
+      if (importantCount > 0) message += `${criticalCount > 0 ? ', ' : '('}${importantCount} important)`;
+      
+      if (suggestionAndNitCount > 0) {
+        message += `. Plus ${suggestionAndNitCount} suggestion${suggestionAndNitCount === 1 ? '' : 's'}.`;
       }
-      message += ':';
-      if (criticalCount > 0) message += ` ${criticalCount} critical`;
-      if (importantCount > 0) message += ` ${importantCount} important`;
-      if (suggestionCount > 0) message += ` ${suggestionCount} suggestion${suggestionCount > 1 ? 's' : ''}`;
-      if (nitCount > 0) message += ` ${nitCount} nit${nitCount > 1 ? 's' : ''}`;
 
       core.setFailed(message);
       return;
     }
 
-    core.info('Review complete!');
+    if (suggestionAndNitCount > 0) {
+      core.info(`✓ No blocking issues. ${suggestionAndNitCount} suggestion${suggestionAndNitCount === 1 ? '' : 's'} available for review.`);
+    } else {
+      core.info('✓ Review complete - no issues found');
+    }
 
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -314,6 +320,7 @@ async function postResults(
   checkRunId: number,
   state: CheckRunState
 ): Promise<void> {
+  // Only create inline comments for CRITICAL and IMPORTANT
   const criticalAndImportant = newIssues.filter(
     i => i.severity === 'CRITICAL' || i.severity === 'IMPORTANT'
   );
@@ -323,7 +330,7 @@ async function postResults(
     filePatches.set(file.filename, file.patch);
   }
 
-  // If we have inline comments to post, create a review with ALL issues in the body
+  // If we have CRITICAL/IMPORTANT issues, create review with inline comments
   if (criticalAndImportant.length > 0) {
     core.info(`Creating review with ${criticalAndImportant.length} inline comments`);
     
@@ -350,8 +357,8 @@ async function postResults(
       }
     }
   } else {
-    // No inline comments - post PR comment with all issues
-    core.info('No inline comments to post, creating PR comment');
+    // No CRITICAL/IMPORTANT - just post a comment with all issues
+    core.info('No CRITICAL/IMPORTANT issues, creating PR comment');
     if (allIssues.length > 0) {
       const comment = formatIssueComment(allIssues, newIssues);
       await createOrUpdateComment(octokit, owner, repo, prNumber, comment);

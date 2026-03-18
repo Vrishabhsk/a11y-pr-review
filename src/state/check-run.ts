@@ -74,8 +74,11 @@ export async function getPreviousCheckRunForPR(
         per_page: 100,
       });
 
-      // Search for check runs on previous commits
-      for (const commit of commits.reverse()) { // reverse to start from oldest
+      // Search for check runs on previous commits (starting from most recent)
+      // Don't reverse - we want to start from the newest commit
+      for (const commit of commits) {
+        // Skip the current head SHA (we already checked it above)
+        if (commit.sha === headSha) continue;
         try {
           const refCheckRuns = await octokit.rest.checks.listForRef({
             owner,

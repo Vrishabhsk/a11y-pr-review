@@ -6,10 +6,19 @@ A GitHub Action that automatically reviews pull requests for accessibility (WCAG
 
 - **WCAG Compliance**: Analyzes code for WCAG 2.1 and WCAG 2.2 Level A/AA violations
 - **Dual LLM Backend**: Supports Google Gemini API and self-hosted Ollama
+- **Incremental Analysis**: Only analyzes files changed since the last run
+- **Smart Deduplication**: Won't re-report the same issue twice across commits
 - **Smart Feedback**:
   - 🔴 **CRITICAL** & 🟠 **IMPORTANT** → Posted as **inline review comments** on specific lines
   - 🟡 **SUGGESTION** & ⚪ **NIT** → Posted as a single **aggregated PR comment**
-- **Minimal & Robust**: Simple architecture with fewer failure points
+- **Fails on Issues**: Configurable failure when accessibility issues are found
+
+## How It Works
+
+1. **First Run**: Analyzes all files in the PR
+2. **Subsequent Runs**: Only analyzes files changed since the last run
+3. **Deduplication**: Uses issue hashes (`file:wcag_criterion:title`) to avoid re-reporting
+4. **Re-analysis**: If a file is modified again, re-analyzes it and updates issues for that file
 
 ## Usage
 
@@ -25,6 +34,7 @@ on:
 permissions:
   contents: read
   pull-requests: write
+  checks: write
 
 jobs:
   a11y-review:
@@ -33,12 +43,13 @@ jobs:
       - uses: actions/checkout@v4
       
       - name: Accessibility Review
-        uses: your-org/a11y-pr-review@v4
+        uses: your-org/a11y-pr-review@v5
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           llm-backend: 'gemini'
           api-key: ${{ secrets.GEMINI_API_KEY }}
-          # model: 'gemini-2.0-flash'  # optional, defaults to gemini-2.0-flash
+          # model: 'gemini-2.0-flash'  # optional
+          # fail-on-issues: 'true'     # optional, defaults to true
 ```
 
 ### With Ollama (Self-Hosted)
@@ -53,6 +64,7 @@ on:
 permissions:
   contents: read
   pull-requests: write
+  checks: write
 
 jobs:
   a11y-review:
@@ -64,7 +76,7 @@ jobs:
         run: ollama pull qwen2.5-coder:32b
       
       - name: Accessibility Review
-        uses: your-org/a11y-pr-review@v4
+        uses: your-org/a11y-pr-review@v5
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           llm-backend: 'ollama'
@@ -98,6 +110,24 @@ jobs:
 | 🟡 **SUGGESTION** | Recommended improvements | Aggregated PR comment |
 | ⚪ **NIT** | Best practices | Aggregated PR comment |
 
+## State Persistence
+
+The action uses GitHub Check Runs to persist state across runs:
+
+- **Issue Hashes**: Stored to avoid duplicate reports
+- **Analyzed Files**: Tracked to enable incremental analysis
+- **Last SHA**: Used to determine what to re-analyze
+
+State is stored in the Check Run's `output.text` field as JSON.
+
+## Deduplication
+
+Issues are hashed using: `file:wcag_criterion:title`
+
+- Same issue on same file = won't re-report
+- File modified = re-analyzed, old issues removed, new issues added
+- Issue moved to different line = still recognized as same issue (line not in hash)
+
 ## Setup
 
 ### 1. Build and Commit
@@ -106,15 +136,15 @@ jobs:
 npm install
 npm run build
 git add .
-git commit -m "refactor: improve action with inline comments"
+git commit -m "feat: Add incremental analysis and deduplication"
 git push
 ```
 
 ### 2. Create Version Tag
 
 ```bash
-git tag -a v4 -m "Add inline review comments for critical issues"
-git push origin v4
+git tag -a v5 -m "Add incremental analysis and deduplication"
+git push origin v5
 ```
 
 ### 3. Use in Your Workflow
@@ -132,6 +162,14 @@ npm run build
 ```
 src/
 ├── index.ts           # Main entry point
+├── state/
+│   ├── index.ts       # State exports
+│   ├── types.ts       # Type definitions
+│   └── check-run.ts   # Check Run management
+├── github/
+│   ├── index.ts       # GitHub exports
+│   ├── client.ts      # GitHub API client
+│   └── comments.ts    # Comment management
 ├── llm/
 │   ├── index.ts
 │   ├── gemini-client.ts

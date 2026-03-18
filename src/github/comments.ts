@@ -46,58 +46,51 @@ export async function createOrUpdateComment(
 }
 
 export function formatIssueComment(
-  allIssues: A11yIssue[],
+  issues: A11yIssue[],
   newIssues: A11yIssue[],
   summary?: string
 ): string {
   const sections: string[] = [];
 
-  const total = Math.min(allIssues.length, MAX_ISSUES);
+  const total = Math.min(issues.length, MAX_ISSUES);
   const newCount = newIssues.length;
 
-  sections.push('## ♿ Accessibility Review', '');
+  sections.push('## ♿ Accessibility Suggestions', '');
 
   if (summary) {
     sections.push(`> ${summary}`, '');
   }
 
-  const newLabel = newCount > 0 ? ` (${newCount} new since last analysis)` : '';
-  sections.push(`**Found ${total} issue${total === 1 ? '' : 's'}${newLabel}:**`, '');
+  if (newCount > 0) {
+    sections.push(`**Found ${total} suggestion${total === 1 ? '' : 's'} (${newCount} new since last analysis):**`, '');
+  } else {
+    sections.push(`**Found ${total} suggestion${total === 1 ? '' : 's'}:**`, '');
+  }
 
-  // Apply MAX_ISSUES limit to ALL issues first, then filter by severity
-  const limitedIssues = allIssues.slice(0, MAX_ISSUES);
+  // Apply MAX_ISSUES limit first, then filter by severity
+  const limitedIssues = issues.slice(0, MAX_ISSUES);
 
-  const critical = limitedIssues.filter(i => i.severity === 'CRITICAL');
-  const important = limitedIssues.filter(i => i.severity === 'IMPORTANT');
   const suggestions = limitedIssues.filter(i => i.severity === 'SUGGESTION');
   const nits = limitedIssues.filter(i => i.severity === 'NIT');
-
-  if (critical.length > 0) {
-    sections.push('### 🔴 Critical Issues', '');
-    for (const issue of critical) {
-      sections.push(formatIssueItem(issue, newIssues));
-    }
-  }
-
-  if (important.length > 0) {
-    sections.push('### 🟠 Important Issues', '');
-    for (const issue of important) {
-      sections.push(formatIssueItem(issue, newIssues));
-    }
-  }
 
   if (suggestions.length > 0) {
     sections.push('### 🟡 Suggestions', '');
     for (const issue of suggestions) {
-      sections.push(formatIssueItem(issue, newIssues));
+      const isNew = newIssues.includes(issue);
+      sections.push(formatIssueItem(issue, isNew));
     }
   }
 
   if (nits.length > 0) {
     sections.push('### ⚪ Minor Improvements', '');
     for (const issue of nits) {
-      sections.push(formatIssueItem(issue, newIssues));
+      const isNew = newIssues.includes(issue);
+      sections.push(formatIssueItem(issue, isNew));
     }
+  }
+
+  if (suggestions.length === 0 && nits.length === 0) {
+    sections.push('No suggestions at this time.');
   }
 
   sections.push('');
@@ -107,9 +100,8 @@ export function formatIssueComment(
   return sections.join('\n');
 }
 
-function formatIssueItem(issue: A11yIssue, newIssues: A11yIssue[]): string {
+function formatIssueItem(issue: A11yIssue, isNew: boolean): string {
   const lines: string[] = [];
-  const isNew = newIssues.includes(issue);
   const newBadge = isNew ? ' ⚡ **NEW**' : '';
 
   const location = issue.file + (issue.line ? `:${issue.line}` : '');

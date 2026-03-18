@@ -341,10 +341,19 @@ async function postResults(
     }
   }
 
-  if (allIssues.length > 0) {
-    const comment = formatIssueComment(allIssues, newIssues);
+  // PR comment: Only SUGGESTION/NIT issues (CRITICAL/IMPORTANT are in inline review)
+  const suggestionsAndNits = allIssues.filter(
+    i => i.severity === 'SUGGESTION' || i.severity === 'NIT'
+  );
+  const newSuggestionsAndNits = newIssues.filter(
+    i => i.severity === 'SUGGESTION' || i.severity === 'NIT'
+  );
+
+  if (suggestionsAndNits.length > 0) {
+    core.info(`Posting PR comment with ${suggestionsAndNits.length} suggestions/nits`);
+    const comment = formatIssueComment(suggestionsAndNits, newSuggestionsAndNits);
     await createOrUpdateComment(octokit, owner, repo, prNumber, comment);
-  } else {
+  } else if (allIssues.length === 0) {
     await createOrUpdateComment(octokit, owner, repo, prNumber, formatNoIssuesComment());
   }
 

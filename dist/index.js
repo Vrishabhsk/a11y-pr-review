@@ -31652,54 +31652,48 @@ async function createOrUpdateComment(octokit, owner, repo, prNumber, body) {
         return newComment.id;
     }
 }
-function formatIssueComment(allIssues, newIssues, summary) {
+function formatIssueComment(issues, newIssues, summary) {
     const sections = [];
-    const total = Math.min(allIssues.length, types_1.MAX_ISSUES);
+    const total = Math.min(issues.length, types_1.MAX_ISSUES);
     const newCount = newIssues.length;
-    sections.push('## ♿ Accessibility Review', '');
+    sections.push('## ♿ Accessibility Suggestions', '');
     if (summary) {
         sections.push(`> ${summary}`, '');
     }
-    const newLabel = newCount > 0 ? ` (${newCount} new since last analysis)` : '';
-    sections.push(`**Found ${total} issue${total === 1 ? '' : 's'}${newLabel}:**`, '');
-    // Apply MAX_ISSUES limit to ALL issues first, then filter by severity
-    const limitedIssues = allIssues.slice(0, types_1.MAX_ISSUES);
-    const critical = limitedIssues.filter(i => i.severity === 'CRITICAL');
-    const important = limitedIssues.filter(i => i.severity === 'IMPORTANT');
+    if (newCount > 0) {
+        sections.push(`**Found ${total} suggestion${total === 1 ? '' : 's'} (${newCount} new since last analysis):**`, '');
+    }
+    else {
+        sections.push(`**Found ${total} suggestion${total === 1 ? '' : 's'}:**`, '');
+    }
+    // Apply MAX_ISSUES limit first, then filter by severity
+    const limitedIssues = issues.slice(0, types_1.MAX_ISSUES);
     const suggestions = limitedIssues.filter(i => i.severity === 'SUGGESTION');
     const nits = limitedIssues.filter(i => i.severity === 'NIT');
-    if (critical.length > 0) {
-        sections.push('### 🔴 Critical Issues', '');
-        for (const issue of critical) {
-            sections.push(formatIssueItem(issue, newIssues));
-        }
-    }
-    if (important.length > 0) {
-        sections.push('### 🟠 Important Issues', '');
-        for (const issue of important) {
-            sections.push(formatIssueItem(issue, newIssues));
-        }
-    }
     if (suggestions.length > 0) {
         sections.push('### 🟡 Suggestions', '');
         for (const issue of suggestions) {
-            sections.push(formatIssueItem(issue, newIssues));
+            const isNew = newIssues.includes(issue);
+            sections.push(formatIssueItem(issue, isNew));
         }
     }
     if (nits.length > 0) {
         sections.push('### ⚪ Minor Improvements', '');
         for (const issue of nits) {
-            sections.push(formatIssueItem(issue, newIssues));
+            const isNew = newIssues.includes(issue);
+            sections.push(formatIssueItem(issue, isNew));
         }
+    }
+    if (suggestions.length === 0 && nits.length === 0) {
+        sections.push('No suggestions at this time.');
     }
     sections.push('');
     sections.push('---');
     sections.push('*🤖 This review was automatically generated. Please verify all suggestions.*');
     return sections.join('\n');
 }
-function formatIssueItem(issue, newIssues) {
+function formatIssueItem(issue, isNew) {
     const lines = [];
-    const isNew = newIssues.includes(issue);
     const newBadge = isNew ? ' ⚡ **NEW**' : '';
     const location = issue.file + (issue.line ? `:${issue.line}` : '');
     lines.push(`- **${location}**${newBadge} - ${issue.title || issue.description}`);
@@ -31980,11 +31974,15 @@ async function postResults(octokit, owner, repo, prNumber, headSha, allIssues, n
             core.warning(`Failed to create inline review: ${error}`);
         }
     }
-    if (allIssues.length > 0) {
-        const comment = (0, comments_1.formatIssueComment)(allIssues, newIssues);
+    // PR comment: Only SUGGESTION/NIT issues (CRITICAL/IMPORTANT are in inline review)
+    const suggestionsAndNits = allIssues.filter(i => i.severity === 'SUGGESTION' || i.severity === 'NIT');
+    const newSuggestionsAndNits = newIssues.filter(i => i.severity === 'SUGGESTION' || i.severity === 'NIT');
+    if (suggestionsAndNits.length > 0) {
+        core.info(`Posting PR comment with ${suggestionsAndNits.length} suggestions/nits`);
+        const comment = (0, comments_1.formatIssueComment)(suggestionsAndNits, newSuggestionsAndNits);
         await (0, comments_1.createOrUpdateComment)(octokit, owner, repo, prNumber, comment);
     }
-    else {
+    else if (allIssues.length === 0) {
         await (0, comments_1.createOrUpdateComment)(octokit, owner, repo, prNumber, (0, comments_1.formatNoIssuesComment)());
     }
     await (0, check_run_1.finalizeCheckRun)(octokit, owner, repo, checkRunId, state, newIssues.length);

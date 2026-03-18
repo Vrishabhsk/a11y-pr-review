@@ -31440,6 +31440,7 @@ const gemini_client_1 = __nccwpck_require__(1942);
 const ollama_client_1 = __nccwpck_require__(6849);
 const prompts_1 = __nccwpck_require__(831);
 const diff_parser_1 = __nccwpck_require__(5597);
+const COMMENT_IDENTIFIER = '<!-- a11y-review -->';
 async function run() {
     try {
         core.info('Starting accessibility review...');
@@ -31460,6 +31461,7 @@ async function run() {
         const prNumber = context.payload.pull_request?.number;
         const owner = context.repo.owner;
         const repo = context.repo.repo;
+        const commitSha = context.sha;
         if (!prNumber) {
             core.setFailed('Could not determine PR number');
             return;
@@ -31475,14 +31477,14 @@ async function run() {
         });
         if (!files || files.length === 0) {
             core.info('No files changed in this PR');
-            await postComment(octokit, owner, repo, prNumber, '✅ No files changed in this PR.');
+            await postComment(octokit, owner, repo, prNumber, formatNoIssuesComment('No files changed in this PR.'));
             core.setOutput('issues-found', '0');
             return;
         }
         const relevantFiles = files.filter(f => f.patch && (0, diff_parser_1.isAccessibilityRelevant)(f.filename));
         if (relevantFiles.length === 0) {
             core.info('No accessibility-relevant files found');
-            await postComment(octokit, owner, repo, prNumber, '✅ No accessibility-relevant changes found in this PR.');
+            await postComment(octokit, owner, repo, prNumber, formatNoIssuesComment('No accessibility-relevant changes found.'));
             core.setOutput('issues-found', '0');
             return;
         }
@@ -31507,15 +31509,36 @@ async function run() {
         const issues = result.issues;
         const summary = result.summary;
         core.info(`Found ${issues.length} accessibility issues`);
+        if (issues.length === 0) {
+            await postComment(octokit, owner, repo, prNumber, formatNoIssuesComment(summary));
+            core.setOutput('issues-found', '0');
+            core.info('Review complete!');
+            return;
+        }
         const maxIssues = 50;
         const limitedIssues = issues.slice(0, maxIssues);
-        if (limitedIssues.length > 0) {
-            const comment = formatReviewComment(limitedIssues, summary);
-            await postComment(octokit, owner, repo, prNumber, comment);
+        const criticalAndImportant = limitedIssues.filter(i => i.severity === 'CRITICAL' || i.severity === 'IMPORTANT');
+        const suggestionsAndNits = limitedIssues.filter(i => i.severity === 'SUGGESTION' || i.severity === 'NIT');
+        const criticalCount = limitedIssues.filter(i => i.severity === 'CRITICAL').length;
+        const importantCount = limitedIssues.filter(i => i.severity === 'IMPORTANT').length;
+        const suggestionCount = limitedIssues.filter(i => i.severity === 'SUGGESTION').length;
+        const nitCount = limitedIssues.filter(i => i.severity === 'NIT').length;
+        core.info(`Critical: ${criticalCount}, Important: ${importantCount}, Suggestions: ${suggestionCount}, Nits: ${nitCount}`);
+        const filePatches = new Map();
+        for (const file of relevantFiles) {
+            filePatches.set(file.filename, file.patch);
         }
-        else {
-            const comment = formatNoIssuesComment();
-            await postComment(octokit, owner, repo, prNumber, comment);
+        if (criticalAndImportant.length > 0) {
+            core.info('Creating review with inline comments for critical/important issues...');
+            await createReviewWithInlineComments(octokit, owner, repo, prNumber, commitSha, criticalAndImportant, filePatches, summary);
+        }
+        if (suggestionsAndNits.length > 0) {
+            core.info('Posting comment for suggestions and nits...');
+            const comment = formatSuggestionComment(suggestionsAndNits, summary);
+            await postComment(octokit, owner, repo, prNumber, comment, criticalAndImportant.length === 0);
+        }
+        if (criticalAndImportant.length === 0 && suggestionsAndNits.length === 0) {
+            await postComment(octokit, owner, repo, prNumber, formatNoIssuesComment(summary));
         }
         core.setOutput('issues-found', String(limitedIssues.length));
         core.info('Review complete!');
@@ -31523,23 +31546,140 @@ async function run() {
     catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         core.setFailed(`Action failed: ${message}`);
-        core.debug(`Stack trace: ${error instanceof Error ? error.stack : 'N/A'}`);
+        if (error instanceof Error && error.stack) {
+            core.debug(`Stack trace: ${error.stack}`);
+        }
     }
 }
-async function postComment(octokit, owner, repo, prNumber, body) {
+async function createReviewWithInlineComments(octokit, owner, repo, prNumber, commitSha, issues, filePatches, summary) {
+    const comments = [];
+    for (const issue of issues) {
+        if (!issue.line || issue.line < 1)
+            continue;
+        if (!issue.file)
+            continue;
+        const patch = filePatches.get(issue.file);
+        if (!patch)
+            continue;
+        const position = findLineInPatch(patch, issue.line);
+        if (position === null)
+            continue;
+        comments.push({
+            path: issue.file,
+            line: position,
+            body: formatInlineComment(issue),
+        });
+    }
+    if (comments.length === 0) {
+        core.info('No valid inline comments to post, falling back to PR comment');
+        const comment = formatSuggestionComment(issues, summary);
+        await postComment(octokit, owner, repo, prNumber, comment, true);
+        return;
+    }
+    const criticalCount = issues.filter(i => i.severity === 'CRITICAL').length;
+    const importantCount = issues.filter(i => i.severity === 'IMPORTANT').length;
+    let body = `## ♿ Accessibility Review\n\n`;
+    body += `> ${summary}\n\n`;
+    body += `Found **${issues.length}** issues requiring attention:\n\n`;
+    if (criticalCount > 0)
+        body += `- 🔴 **${criticalCount}** Critical\n`;
+    if (importantCount > 0)
+        body += `- 🟠 **${importantCount}** Important\n`;
+    body += `\n---\n`;
+    body += `*Please review each inline suggestion and apply fixes as needed.*`;
+    try {
+        await octokit.rest.pulls.createReview({
+            owner,
+            repo,
+            pull_number: prNumber,
+            commit_id: commitSha,
+            event: 'COMMENT',
+            body,
+            comments: comments.map(c => ({
+                path: c.path,
+                line: c.line,
+                body: c.body,
+            })),
+        });
+        core.info(`Created review with ${comments.length} inline comments`);
+    }
+    catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        core.warning(`Failed to create review with inline comments: ${msg}`);
+        core.info('Falling back to PR comment');
+        const comment = formatSuggestionComment(issues, summary);
+        await postComment(octokit, owner, repo, prNumber, comment, true);
+    }
+}
+function findLineInPatch(patch, targetLine) {
+    const lines = patch.split('\n');
+    let currentNewLine = 0;
+    const hunkHeaderRegex = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
+    let inHunk = false;
+    let hunkStartLine = 0;
+    for (const line of lines) {
+        const match = line.match(hunkHeaderRegex);
+        if (match) {
+            hunkStartLine = parseInt(match[1], 10);
+            currentNewLine = hunkStartLine;
+            inHunk = true;
+            continue;
+        }
+        if (!inHunk)
+            continue;
+        if (line.startsWith('+')) {
+            if (currentNewLine === targetLine) {
+                return currentNewLine;
+            }
+            currentNewLine++;
+        }
+        else if (line.startsWith('-')) {
+        }
+        else if (line.startsWith(' ')) {
+            if (currentNewLine === targetLine) {
+                return currentNewLine;
+            }
+            currentNewLine++;
+        }
+        else if (!line.startsWith('\\')) {
+            if (currentNewLine === targetLine) {
+                return currentNewLine;
+            }
+            currentNewLine++;
+        }
+    }
+    return null;
+}
+function formatInlineComment(issue) {
+    const emoji = issue.severity === 'CRITICAL' ? '🔴' : '🟠';
+    const lines = [
+        `${emoji} **${issue.title || 'Accessibility Issue'}**`,
+        '',
+        `**WCAG ${issue.wcag_criterion}** (Level ${issue.wcag_level})`,
+        '',
+        issue.description,
+    ];
+    if (issue.suggestion) {
+        lines.push('', '**Suggested fix:**', '```suggestion', issue.suggestion, '```');
+    }
+    return lines.join('\n');
+}
+async function postComment(octokit, owner, repo, prNumber, body, includeIdentifier = true) {
     const { data: comments } = await octokit.rest.issues.listComments({
         owner,
         repo,
         issue_number: prNumber,
+        per_page: 100,
     });
     const botComment = comments.find(c => c.user?.type === 'Bot' &&
-        c.body?.includes('<!-- a11y-review -->'));
+        c.body?.includes(COMMENT_IDENTIFIER));
+    const fullBody = includeIdentifier ? `${COMMENT_IDENTIFIER}\n${body}` : body;
     if (botComment) {
         await octokit.rest.issues.updateComment({
             owner,
             repo,
             comment_id: botComment.id,
-            body,
+            body: fullBody,
         });
     }
     else {
@@ -31547,48 +31687,35 @@ async function postComment(octokit, owner, repo, prNumber, body) {
             owner,
             repo,
             issue_number: prNumber,
-            body,
+            body: fullBody,
         });
     }
 }
-function formatReviewComment(issues, summary) {
-    const sections = [
-        '<!-- a11y-review -->',
-        '## ♿ Accessibility Review',
-        '',
-        summary ? `> ${summary}` : '> Automated WCAG 2.1/2.2 accessibility analysis',
-        '',
-    ];
-    const critical = issues.filter(i => i.severity === 'CRITICAL');
-    const important = issues.filter(i => i.severity === 'IMPORTANT');
-    const suggestion = issues.filter(i => i.severity === 'SUGGESTION');
-    const nit = issues.filter(i => i.severity === 'NIT');
-    if (critical.length > 0) {
-        sections.push('### 🔴 Critical Issues');
-        sections.push('');
-        for (const issue of critical) {
-            sections.push(formatIssue(issue));
+function formatSuggestionComment(issues, summary) {
+    const sections = [];
+    sections.push('## ♿ Accessibility Suggestions', '');
+    if (summary) {
+        sections.push(`> ${summary}`, '');
+    }
+    const suggestions = issues.filter(i => i.severity === 'SUGGESTION');
+    const nits = issues.filter(i => i.severity === 'NIT');
+    const others = issues.filter(i => i.severity !== 'SUGGESTION' && i.severity !== 'NIT');
+    if (others.length > 0) {
+        sections.push('### Issues', '');
+        for (const issue of others) {
+            sections.push(formatIssueItem(issue));
         }
     }
-    if (important.length > 0) {
-        sections.push('### 🟠 Important Issues');
-        sections.push('');
-        for (const issue of important) {
-            sections.push(formatIssue(issue));
+    if (suggestions.length > 0) {
+        sections.push('### 🟡 Suggestions', '');
+        for (const issue of suggestions) {
+            sections.push(formatIssueItem(issue));
         }
     }
-    if (suggestion.length > 0) {
-        sections.push('### 🟡 Suggestions');
-        sections.push('');
-        for (const issue of suggestion) {
-            sections.push(formatIssue(issue));
-        }
-    }
-    if (nit.length > 0) {
-        sections.push('### ⚪ Minor Issues');
-        sections.push('');
-        for (const issue of nit) {
-            sections.push(formatIssue(issue));
+    if (nits.length > 0) {
+        sections.push('### ⚪ Minor Improvements', '');
+        for (const issue of nits) {
+            sections.push(formatIssueItem(issue));
         }
     }
     sections.push('');
@@ -31596,30 +31723,32 @@ function formatReviewComment(issues, summary) {
     sections.push('*🤖 This review was automatically generated. Please verify all suggestions.*');
     return sections.join('\n');
 }
-function formatIssue(issue) {
-    const lines = [
-        `**${issue.file}${issue.line ? `:${issue.line}` : ''}**`,
-        `- **WCAG ${issue.wcag_criterion}** (Level ${issue.wcag_level})`,
-        `- ${issue.description}`,
-    ];
+function formatIssueItem(issue) {
+    const lines = [];
+    const location = issue.file + (issue.line ? `:${issue.line}` : '');
+    lines.push(`- **${location}** - ${issue.title || issue.description}`);
+    lines.push(`  - WCAG ${issue.wcag_criterion} (Level ${issue.wcag_level})`);
     if (issue.suggestion) {
-        lines.push(`- **Fix**: ${issue.suggestion}`);
+        lines.push(`  - **Fix:** ${issue.suggestion}`);
     }
     lines.push('');
     return lines.join('\n');
 }
-function formatNoIssuesComment() {
-    return [
-        '<!-- a11y-review -->',
+function formatNoIssuesComment(summary) {
+    const lines = [
         '## ✅ Accessibility Review',
         '',
-        'No accessibility issues were found in this PR.',
-        '',
-        'The changes appear to follow WCAG 2.1/2.2 guidelines.',
-        '',
-        '---',
-        '*🤖 This review was automatically generated.*',
-    ].join('\n');
+    ];
+    if (summary) {
+        lines.push(`> ${summary}`, '');
+    }
+    lines.push('No accessibility issues were found in this PR.');
+    lines.push('');
+    lines.push('The changes appear to follow WCAG 2.1/2.2 guidelines.');
+    lines.push('');
+    lines.push('---');
+    lines.push('*🤖 This review was automatically generated.*');
+    return `${COMMENT_IDENTIFIER}\n${lines.join('\n')}`;
 }
 run();
 

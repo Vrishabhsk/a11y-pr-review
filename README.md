@@ -6,8 +6,10 @@ A GitHub Action that automatically reviews pull requests for accessibility (WCAG
 
 - **WCAG Compliance**: Analyzes code for WCAG 2.1 and WCAG 2.2 Level A/AA violations
 - **Dual LLM Backend**: Supports Google Gemini API and self-hosted Ollama
-- **Minimal & Robust**: Simple, focused design with fewer failure points
-- **GitHub Native**: Posts comments directly on PRs
+- **Smart Feedback**:
+  - 🔴 **CRITICAL** & 🟠 **IMPORTANT** → Posted as **inline review comments** on specific lines
+  - 🟡 **SUGGESTION** & ⚪ **NIT** → Posted as a single **aggregated PR comment**
+- **Minimal & Robust**: Simple architecture with fewer failure points
 
 ## Usage
 
@@ -18,7 +20,7 @@ name: Accessibility Review
 
 on:
   pull_request:
-    types: [opened, synchronize]
+    types: [opened, synchronize, reopened]
 
 permissions:
   contents: read
@@ -31,11 +33,12 @@ jobs:
       - uses: actions/checkout@v4
       
       - name: Accessibility Review
-        uses: your-org/a11y-pr-review@v3
+        uses: your-org/a11y-pr-review@v4
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           llm-backend: 'gemini'
           api-key: ${{ secrets.GEMINI_API_KEY }}
+          # model: 'gemini-2.0-flash'  # optional, defaults to gemini-2.0-flash
 ```
 
 ### With Ollama (Self-Hosted)
@@ -45,7 +48,7 @@ name: Accessibility Review
 
 on:
   pull_request:
-    types: [opened, synchronize]
+    types: [opened, synchronize, reopened]
 
 permissions:
   contents: read
@@ -53,12 +56,15 @@ permissions:
 
 jobs:
   a11y-review:
-    runs-on: self-hosted  # Or a runner with GPU
+    runs-on: self-hosted  # Requires a runner with Ollama
     steps:
       - uses: actions/checkout@v4
       
+      - name: Pull Ollama Model
+        run: ollama pull qwen2.5-coder:32b
+      
       - name: Accessibility Review
-        uses: your-org/a11y-pr-review@v3
+        uses: your-org/a11y-pr-review@v4
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           llm-backend: 'ollama'
@@ -72,7 +78,7 @@ jobs:
 |-------|-------------|----------|---------|
 | `github-token` | GitHub token for API access | Yes | `${{ github.token }}` |
 | `llm-backend` | LLM backend (`gemini` or `ollama`) | Yes | `gemini` |
-| `api-key` | API key (Gemini required) | For Gemini | - |
+| `api-key` | API key (required for Gemini) | For Gemini | - |
 | `model` | Model to use | No | `gemini-2.0-flash` |
 | `ollama-url` | Ollama API URL | No | `http://localhost:11434` |
 
@@ -80,70 +86,45 @@ jobs:
 
 | Output | Description |
 |--------|-------------|
-| `issues-found` | Number of accessibility issues found |
+| `issues-found` | Total number of accessibility issues found |
 
-## Severity Levels
+## Severity Levels & Feedback
 
-| Level | Description |
-|-------|-------------|
-| 🔴 **CRITICAL** | Blocks screen readers/keyboard users |
-| 🟠 **IMPORTANT** | WCAG A/AA violations impacting usability |
-| 🟡 **SUGGESTION** | Recommended improvements |
-| ⚪ **NIT** | Best practices |
+| Level | Description | Feedback Type |
+|-------|-------------|---------------|
+| 🔴 **CRITICAL** | Blocks screen readers/keyboard users | Inline review comment |
+| 🟠 **IMPORTANT** | WCAG A/AA violations impacting usability | Inline review comment |
+| 🟡 **SUGGESTION** | Recommended improvements | Aggregated PR comment |
+| ⚪ **NIT** | Best practices | Aggregated PR comment |
 
-## Setup After v1/v2 Tags
-
-Since you already have v1 and v2 tags, here's the process:
+## Setup
 
 ### 1. Build and Commit
+
 ```bash
 npm install
 npm run build
 git add .
-git commit -m "Refactor: Simplify architecture for robustness"
+git commit -m "refactor: improve action with inline comments"
 git push
 ```
 
-### 2. Create v3 Tag
+### 2. Create Version Tag
+
 ```bash
-git tag -a v3 -m "Simplified, robust architecture"
-git push origin v3
+git tag -a v4 -m "Add inline review comments for critical issues"
+git push origin v4
 ```
 
-### 3. Update Major Version Tags (Optional)
-To update users on v1/v2 to use v3:
-```bash
-# Delete old v1/v2 tags if you want to repoint them
-git tag -d v1
-git push origin :refs/tags/v1
+### 3. Use in Your Workflow
 
-# Create new v1 pointing to v3 (for automatic updates)
-git tag v1
-git push origin v1
-```
-
-### 4. Test the Action
-Create a test PR in a repo using this action to verify it works.
+Add the workflow YAML to your repository's `.github/workflows/` directory.
 
 ## Development
 
 ### Build
 ```bash
-npm install
 npm run build
-```
-
-### Local Testing
-```bash
-export INPUT_GITHUB_TOKEN="${GITHUB_TOKEN}"
-export INPUT_LLM_BACKEND=gemini
-export INPUT_API_KEY="${GEMINI_API_KEY}"
-export GITHUB_REPOSITORY=owner/repo
-export GITHUB_EVENT_NAME=pull_request
-export GITHUB_EVENT_PATH=/tmp/event.json
-
-# Create event.json with PR payload
-node dist/index.js
 ```
 
 ### Project Structure

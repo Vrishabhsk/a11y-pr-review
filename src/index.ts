@@ -334,6 +334,7 @@ async function postResults(
         prNumber,
         headSha,
         criticalAndImportant,
+        allIssues,
         filePatches
       );
     } catch (error) {
@@ -343,16 +344,7 @@ async function postResults(
 
   // PR comment: ALL issues (complete summary)
   if (allIssues.length > 0) {
-    const criticalAndImportantCount = allIssues.filter(
-      i => i.severity === 'CRITICAL' || i.severity === 'IMPORTANT'
-    ).length;
-    
-    let summaryText: string | undefined;
-    if (criticalAndImportantCount > 0) {
-      summaryText = `${criticalAndImportantCount} issue${criticalAndImportantCount === 1 ? '' : 's'} have inline suggestions in the Files Changed tab.`;
-    }
-    
-    const comment = formatIssueComment(allIssues, newIssues, summaryText);
+    const comment = formatIssueComment(allIssues, newIssues);
     await createOrUpdateComment(octokit, owner, repo, prNumber, comment);
   } else {
     await createOrUpdateComment(octokit, owner, repo, prNumber, formatNoIssuesComment());

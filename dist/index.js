@@ -31505,9 +31505,9 @@ async function getFilesChangedBetween(octokit, owner, repo, baseSha, headSha) {
     }
     return changedFiles;
 }
-async function createReview(octokit, owner, repo, prNumber, headSha, issues, filePatches) {
+async function createReview(octokit, owner, repo, prNumber, headSha, issuesForInlineComments, allIssues, filePatches) {
     const comments = [];
-    for (const issue of issues) {
+    for (const issue of issuesForInlineComments) {
         if (!issue.line || issue.line < 1)
             continue;
         if (!issue.file)
@@ -31528,16 +31528,7 @@ async function createReview(octokit, owner, repo, prNumber, headSha, issues, fil
         core.info('No valid inline comments to post');
         return 0;
     }
-    const criticalCount = issues.filter(i => i.severity === 'CRITICAL').length;
-    const importantCount = issues.filter(i => i.severity === 'IMPORTANT').length;
-    let body = `## ♿ Accessibility Review\n\n`;
-    body += `Found **${issues.length}** issues requiring attention:\n\n`;
-    if (criticalCount > 0)
-        body += `- 🔴 **${criticalCount}** Critical\n`;
-    if (importantCount > 0)
-        body += `- 🟠 **${importantCount}** Important\n`;
-    body += `\n---\n`;
-    body += `*Please review each inline suggestion and apply fixes as needed.*`;
+    const body = formatReviewBody(allIssues);
     const { data: review } = await octokit.rest.pulls.createReview({
         owner,
         repo,
@@ -31553,6 +31544,27 @@ async function createReview(octokit, owner, repo, prNumber, headSha, issues, fil
     });
     core.info(`Created review with ${comments.length} inline comments`);
     return review.id;
+}
+function formatReviewBody(allIssues) {
+    const sections = ['## ♿ Accessibility Review', ''];
+    const critical = allIssues.filter(i => i.severity === 'CRITICAL');
+    const important = allIssues.filter(i => i.severity === 'IMPORTANT');
+    const suggestions = allIssues.filter(i => i.severity === 'SUGGESTION');
+    const nits = allIssues.filter(i => i.severity === 'NIT');
+    sections.push(`Found **${allIssues.length}** issue${allIssues.length === 1 ? '' : 's'} requiring attention:`);
+    sections.push('');
+    if (critical.length > 0)
+        sections.push(`- 🔴 **${critical.length}** Critical`);
+    if (important.length > 0)
+        sections.push(`- 🟠 **${important.length}** Important`);
+    if (suggestions.length > 0)
+        sections.push(`- 🟡 **${suggestions.length}** Suggestions`);
+    if (nits.length > 0)
+        sections.push(`- ⚪ **${nits.length}** Minor`);
+    sections.push('');
+    sections.push('---');
+    sections.push('Please review each inline suggestion and apply fixes as needed.');
+    return sections.join('\n');
 }
 function findLineInPatch(patch, targetLine) {
     const lines = patch.split('\n');
@@ -31977,7 +31989,7 @@ async function postResults(octokit, owner, repo, prNumber, headSha, allIssues, n
             filePatches.set(file.filename, file.patch);
         }
         try {
-            await (0, client_1.createReview)(octokit, owner, repo, prNumber, headSha, criticalAndImportant, filePatches);
+            await (0, client_1.createReview)(octokit, owner, repo, prNumber, headSha, criticalAndImportant, allIssues, filePatches);
         }
         catch (error) {
             core.warning(`Failed to create inline review: ${error}`);
@@ -31985,12 +31997,7 @@ async function postResults(octokit, owner, repo, prNumber, headSha, allIssues, n
     }
     // PR comment: ALL issues (complete summary)
     if (allIssues.length > 0) {
-        const criticalAndImportantCount = allIssues.filter(i => i.severity === 'CRITICAL' || i.severity === 'IMPORTANT').length;
-        let summaryText;
-        if (criticalAndImportantCount > 0) {
-            summaryText = `${criticalAndImportantCount} issue${criticalAndImportantCount === 1 ? '' : 's'} have inline suggestions in the Files Changed tab.`;
-        }
-        const comment = (0, comments_1.formatIssueComment)(allIssues, newIssues, summaryText);
+        const comment = (0, comments_1.formatIssueComment)(allIssues, newIssues);
         await (0, comments_1.createOrUpdateComment)(octokit, owner, repo, prNumber, comment);
     }
     else {

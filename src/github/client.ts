@@ -101,7 +101,8 @@ export async function createReview(
   repo: string,
   prNumber: number,
   headSha: string,
-  issues: A11yIssue[],
+  issuesForInlineComments: A11yIssue[],
+  allIssues: A11yIssue[],
   filePatches: Map<string, string>
 ): Promise<number> {
   const comments: Array<{
@@ -110,7 +111,7 @@ export async function createReview(
     body: string;
   }> = [];
 
-  for (const issue of issues) {
+  for (const issue of issuesForInlineComments) {
     if (!issue.line || issue.line < 1) continue;
     if (!issue.file) continue;
 
@@ -132,15 +133,7 @@ export async function createReview(
     return 0;
   }
 
-  const criticalCount = issues.filter(i => i.severity === 'CRITICAL').length;
-  const importantCount = issues.filter(i => i.severity === 'IMPORTANT').length;
-
-  let body = `## ♿ Accessibility Review\n\n`;
-  body += `Found **${issues.length}** issues requiring attention:\n\n`;
-  if (criticalCount > 0) body += `- 🔴 **${criticalCount}** Critical\n`;
-  if (importantCount > 0) body += `- 🟠 **${importantCount}** Important\n`;
-  body += `\n---\n`;
-  body += `*Please review each inline suggestion and apply fixes as needed.*`;
+  const body = formatReviewBody(allIssues);
 
   const { data: review } = await octokit.rest.pulls.createReview({
     owner,
@@ -158,6 +151,28 @@ export async function createReview(
 
   core.info(`Created review with ${comments.length} inline comments`);
   return review.id;
+}
+
+function formatReviewBody(allIssues: A11yIssue[]): string {
+  const sections: string[] = ['## ♿ Accessibility Review', ''];
+
+  const critical = allIssues.filter(i => i.severity === 'CRITICAL');
+  const important = allIssues.filter(i => i.severity === 'IMPORTANT');
+  const suggestions = allIssues.filter(i => i.severity === 'SUGGESTION');
+  const nits = allIssues.filter(i => i.severity === 'NIT');
+
+  sections.push(`Found **${allIssues.length}** issue${allIssues.length === 1 ? '' : 's'} requiring attention:`);
+  sections.push('');
+  if (critical.length > 0) sections.push(`- 🔴 **${critical.length}** Critical`);
+  if (important.length > 0) sections.push(`- 🟠 **${important.length}** Important`);
+  if (suggestions.length > 0) sections.push(`- 🟡 **${suggestions.length}** Suggestions`);
+  if (nits.length > 0) sections.push(`- ⚪ **${nits.length}** Minor`);
+
+  sections.push('');
+  sections.push('---');
+  sections.push('Please review each inline suggestion and apply fixes as needed.');
+
+  return sections.join('\n');
 }
 
 function findLineInPatch(patch: string, targetLine: number): number | null {

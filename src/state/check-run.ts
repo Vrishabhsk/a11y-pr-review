@@ -44,7 +44,7 @@ export async function getPreviousCheckRunForPR(
   
   try {
     // First try to find check run on current head SHA
-    let checkRuns = await octokit.rest.checks.listForRef({
+    const checkRuns = await octokit.rest.checks.listForRef({
       owner,
       repo,
       ref: headSha,
@@ -59,13 +59,6 @@ export async function getPreviousCheckRunForPR(
     if (!matchingRun) {
       core.info('No check run found on current SHA, searching in PR history...');
       
-      // Get the PR to find its base
-      const { data: pr } = await octokit.rest.pulls.get({
-        owner,
-        repo,
-        pull_number: prNumber,
-      });
-
       // List commits in the PR
       const { data: commits } = await octokit.rest.pulls.listCommits({
         owner,

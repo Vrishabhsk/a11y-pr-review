@@ -1,5 +1,5 @@
 import * as github from '@actions/github';
-import { A11yIssue, groupIssuesByFile, MAX_ISSUES } from '../state/types';
+import { A11yIssue, MAX_ISSUES } from '../state/types';
 
 type Octokit = ReturnType<typeof github.getOctokit>;
 
@@ -81,7 +81,7 @@ export function formatIssueComment(
   }
 
   if (important.length > 0) {
-    sections.push('### 🟠 Important Issues', '');
+    sections.push('### 🟡 Important Issues', '');
     for (const issue of important) {
       const isNew = newIssues.includes(issue);
       sections.push(formatIssueItem(issue, isNew));
@@ -89,7 +89,7 @@ export function formatIssueComment(
   }
 
   if (suggestions.length > 0) {
-    sections.push('### 🟡 Suggestions', '');
+    sections.push('### 🟢 Suggestions', '');
     for (const issue of suggestions) {
       const isNew = newIssues.includes(issue);
       sections.push(formatIssueItem(issue, isNew));

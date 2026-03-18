@@ -147,7 +147,7 @@ async function run(): Promise<void> {
         allIssues,
         newIssues,
         relevantFiles,
-        checkRunId,
+        checkRunId!,
         state
       );
 
@@ -262,7 +262,7 @@ async function run(): Promise<void> {
         allIssues,
         newIssues,
         relevantChangedFiles,
-        checkRunId,
+        checkRunId!,
         state
       );
     }
@@ -320,54 +320,63 @@ async function postResults(
   checkRunId: number,
   state: CheckRunState
 ): Promise<void> {
-  // Only create inline comments for CRITICAL and IMPORTANT
   const criticalAndImportant = newIssues.filter(
     i => i.severity === 'CRITICAL' || i.severity === 'IMPORTANT'
+  );
+  const suggestionsAndNits = newIssues.filter(
+    i => i.severity === 'SUGGESTION' || i.severity === 'NIT'
   );
 
   const filePatches = new Map<string, string>();
   for (const file of filesAnalyzed) {
-    filePatches.set(file.filename, file.patch);
+    if (file.filename && file.patch) {
+      filePatches.set(file.filename, file.patch);
+    }
   }
 
-  // If we have CRITICAL/IMPORTANT issues, create review with inline comments
+  let postedSuccessfully = false;
+
   if (criticalAndImportant.length > 0) {
-    core.info(`Creating review with ${criticalAndImportant.length} inline comments`);
+    core.info(`Creating review with ${criticalAndImportant.length} CRITICAL/IMPORTANT issues`);
     
     try {
-      await createReview(
+      const result = await createReview(
         octokit,
         owner,
         repo,
         prNumber,
         headSha,
         criticalAndImportant,
-        allIssues,
+        suggestionsAndNits,
         filePatches
       );
-      // Review created successfully - it contains all issues in the body
+      
+      core.info(`Posted ${result.postedInlineCount} inline comments, ${result.failedInlineIssues.length} issues in body`);
+      postedSuccessfully = true;
     } catch (error) {
-      core.warning(`Failed to create inline review: ${error}`);
-      // Fall back to PR comment if review fails
+      core.warning(`Failed to create review: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  if (!postedSuccessfully) {
+    try {
       if (allIssues.length > 0) {
+        core.info('Falling back to PR comment');
         const comment = formatIssueComment(allIssues, newIssues);
         await createOrUpdateComment(octokit, owner, repo, prNumber, comment);
       } else {
         await createOrUpdateComment(octokit, owner, repo, prNumber, formatNoIssuesComment());
       }
-    }
-  } else {
-    // No CRITICAL/IMPORTANT - just post a comment with all issues
-    core.info('No CRITICAL/IMPORTANT issues, creating PR comment');
-    if (allIssues.length > 0) {
-      const comment = formatIssueComment(allIssues, newIssues);
-      await createOrUpdateComment(octokit, owner, repo, prNumber, comment);
-    } else {
-      await createOrUpdateComment(octokit, owner, repo, prNumber, formatNoIssuesComment());
+    } catch (error) {
+      core.warning(`Failed to create PR comment: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
-  await finalizeCheckRun(octokit, owner, repo, checkRunId, state, newIssues.length);
+  try {
+    await finalizeCheckRun(octokit, owner, repo, checkRunId, state, newIssues.length);
+  } catch (error) {
+    core.warning(`Failed to finalize check run: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 run();

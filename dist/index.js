@@ -31457,6 +31457,7 @@ async function getPRFiles(octokit, owner, repo, prNumber) {
     const files = [];
     let page = 1;
     const perPage = 100;
+    // eslint-disable-next-line no-constant-condition
     while (true) {
         const { data } = await octokit.rest.pulls.listFiles({
             owner,
@@ -31505,32 +31506,36 @@ async function getFilesChangedBetween(octokit, owner, repo, baseSha, headSha) {
     }
     return changedFiles;
 }
-async function createReview(octokit, owner, repo, prNumber, headSha, issuesForInlineComments, allIssues, filePatches) {
-    // Inline comments for CRITICAL and IMPORTANT (both need actionable suggestions)
-    const criticalAndImportant = issuesForInlineComments.filter(i => i.severity === 'CRITICAL' || i.severity === 'IMPORTANT');
+async function createReview(octokit, owner, repo, prNumber, headSha, criticalAndImportant, suggestionsAndNits, filePatches) {
     const comments = [];
+    const failedInlineIssues = [];
+    // Try to create inline comments for CRITICAL and IMPORTANT
     for (const issue of criticalAndImportant) {
-        if (!issue.line || issue.line < 1)
+        if (!issue)
             continue;
-        if (!issue.file)
+        // Issues without line numbers go to failed
+        if (!issue.line || issue.line < 1 || !issue.file) {
+            failedInlineIssues.push(issue);
             continue;
+        }
         const patch = filePatches.get(issue.file);
-        if (!patch)
+        if (!patch) {
+            failedInlineIssues.push(issue);
             continue;
+        }
         const position = findLineInPatch(patch, issue.line);
-        if (position === null)
+        if (position === null) {
+            failedInlineIssues.push(issue);
             continue;
+        }
         comments.push({
             path: issue.file,
             line: position,
             body: formatInlineComment(issue),
         });
     }
-    if (comments.length === 0) {
-        core.info('No valid inline comments to post');
-        return 0;
-    }
-    const body = formatReviewBody(allIssues);
+    // Build review body - SUGGESTION/NIT + FAILED inline (CRITICAL/IMPORTANT fallback)
+    const body = formatReviewBody(suggestionsAndNits, failedInlineIssues);
     const { data: review } = await octokit.rest.pulls.createReview({
         owner,
         repo,
@@ -31544,76 +31549,96 @@ async function createReview(octokit, owner, repo, prNumber, headSha, issuesForIn
             body: c.body,
         })),
     });
-    core.info(`Created review with ${comments.length} inline comments`);
-    return review.id;
+    core.info(`Created review with ${comments.length} inline comments, ${failedInlineIssues.length} issues in body (no line info)`);
+    return { reviewId: review.id, postedInlineCount: comments.length, failedInlineIssues };
 }
-function formatReviewBody(allIssues) {
+function formatReviewBody(suggestionsAndNits, failedInlineIssues = []) {
+    const hasContent = suggestionsAndNits.length > 0 || failedInlineIssues.length > 0;
+    if (!hasContent) {
+        return '## ♿ Accessibility Review\n\n✅ No issues found.';
+    }
     const sections = ['## ♿ Accessibility Review', ''];
-    const critical = allIssues.filter(i => i.severity === 'CRITICAL');
-    const important = allIssues.filter(i => i.severity === 'IMPORTANT');
-    const suggestions = allIssues.filter(i => i.severity === 'SUGGESTION');
-    const nits = allIssues.filter(i => i.severity === 'NIT');
-    // Minimal summary
-    const parts = [];
-    if (critical.length > 0)
-        parts.push(`🔴 ${critical.length} critical`);
-    if (important.length > 0)
-        parts.push(`🟠 ${important.length} important`);
-    if (suggestions.length > 0)
-        parts.push(`🟡 ${suggestions.length} suggestions`);
-    if (nits.length > 0)
-        parts.push(`⚪ ${nits.length} minor`);
-    sections.push(`**${allIssues.length} issue${allIssues.length === 1 ? '' : 's'}:** ${parts.join(' • ')}`);
-    sections.push('');
-    // CRITICAL - full details with suggestions
-    if (critical.length > 0) {
-        sections.push('### 🔴 Critical');
-        for (const issue of critical) {
-            sections.push(formatIssueDetailed(issue));
+    // Failed inline issues (CRITICAL/IMPORTANT without line numbers) - go in body as fallback
+    if (failedInlineIssues.length > 0) {
+        const critical = failedInlineIssues.filter(i => i?.severity === 'CRITICAL');
+        const important = failedInlineIssues.filter(i => i?.severity === 'IMPORTANT');
+        if (critical.length > 0) {
+            sections.push('### 🔴 Critical Issues');
+            sections.push('');
+            for (const issue of critical) {
+                if (!issue)
+                    continue;
+                sections.push(`**${issue.file || 'Unknown file'}**`);
+                sections.push(`- ${issue.title || issue.description || 'No description'}`);
+                if (issue.wcag_criterion) {
+                    sections.push(`  - WCAG ${issue.wcag_criterion} (Level ${issue.wcag_level || 'A'})`);
+                }
+                sections.push('');
+            }
+        }
+        if (important.length > 0) {
+            sections.push('### 🟡 Important Issues');
+            sections.push('');
+            for (const issue of important) {
+                if (!issue)
+                    continue;
+                sections.push(`**${issue.file || 'Unknown file'}**`);
+                sections.push(`- ${issue.title || issue.description || 'No description'}`);
+                if (issue.wcag_criterion) {
+                    sections.push(`  - WCAG ${issue.wcag_criterion} (Level ${issue.wcag_level || 'A'})`);
+                }
+                sections.push('');
+            }
         }
     }
-    // IMPORTANT - full details with suggestions
-    if (important.length > 0) {
-        sections.push('### 🟠 Important');
-        for (const issue of important) {
-            sections.push(formatIssueDetailed(issue));
-        }
-    }
-    // SUGGESTIONS - compact format
+    const suggestions = suggestionsAndNits.filter(i => i?.severity === 'SUGGESTION');
+    const nits = suggestionsAndNits.filter(i => i?.severity === 'NIT');
     if (suggestions.length > 0) {
-        sections.push('### 🟡 Suggestions');
+        sections.push('### 🟢 Suggestions');
+        sections.push('');
         for (const issue of suggestions) {
-            sections.push(formatIssueCompact(issue));
+            if (!issue)
+                continue;
+            const location = (issue.file || 'Unknown') + (issue.line ? `:${issue.line}` : '');
+            sections.push(`**${location}**`);
+            sections.push(`${issue.title || issue.description || 'No description'}`);
+            if (issue.suggestion) {
+                sections.push(`\`\`\`${issue.suggestion}\`\`\``);
+            }
+            sections.push('');
         }
     }
-    // NITS - one-liner
     if (nits.length > 0) {
-        sections.push('### ⚪ Minor');
+        sections.push('### ⚪ Minor Issues');
+        sections.push('');
         for (const issue of nits) {
-            sections.push(formatIssueOneLiner(issue));
+            if (!issue)
+                continue;
+            const location = (issue.file || 'Unknown') + (issue.line ? `:${issue.line}` : '');
+            sections.push(`- ${location}: ${issue.title || issue.description || 'No description'}`);
         }
+        sections.push('');
     }
     sections.push('---');
-    sections.push('*🤖 Click inline suggestions to apply fixes*');
+    sections.push('*🤖 Generated by accessibility review*');
     return sections.join('\n');
 }
-function formatIssueDetailed(issue) {
-    const location = issue.file + (issue.line ? `:${issue.line}` : '');
-    const lines = [`**${location}** — ${issue.title || issue.description}`];
-    lines.push(`WCAG ${issue.wcag_criterion} (Level ${issue.wcag_level})`);
-    if (issue.suggestion) {
-        lines.push(`→ \`${issue.suggestion}\``);
+function formatInlineComment(issue) {
+    if (!issue) {
+        return '🔴 **Unknown Issue**\n\nUnable to format issue details.';
     }
-    lines.push('');
+    const emoji = issue.severity === 'CRITICAL' ? '🔴' : '🟡';
+    const lines = [
+        `${emoji} **${issue.title || 'Accessibility Issue'}**`,
+        '',
+        `**WCAG ${issue.wcag_criterion || 'Unknown'}** (Level ${issue.wcag_level || 'A'})`,
+        '',
+        issue.description || 'No description available',
+    ];
+    if (issue.suggestion) {
+        lines.push('', '**Fix:**', '```suggestion', issue.suggestion, '```');
+    }
     return lines.join('\n');
-}
-function formatIssueCompact(issue) {
-    const location = issue.file + (issue.line ? `:${issue.line}` : '');
-    return `- **${location}** — ${issue.title || issue.description} *(WCAG ${issue.wcag_criterion})*`;
-}
-function formatIssueOneLiner(issue) {
-    const location = issue.file + (issue.line ? `:${issue.line}` : '');
-    return `- ${location}: ${issue.title || issue.description}`;
 }
 function findLineInPatch(patch, targetLine) {
     const lines = patch.split('\n');
@@ -31652,20 +31677,6 @@ function findLineInPatch(patch, targetLine) {
         }
     }
     return null;
-}
-function formatInlineComment(issue) {
-    const emoji = issue.severity === 'CRITICAL' ? '🔴' : '🟠';
-    const lines = [
-        `${emoji} **${issue.title || 'Accessibility Issue'}**`,
-        '',
-        `**WCAG ${issue.wcag_criterion}** (Level ${issue.wcag_level})`,
-        '',
-        issue.description,
-    ];
-    if (issue.suggestion) {
-        lines.push('', '**Suggested fix:**', '```suggestion', issue.suggestion, '```');
-    }
-    return lines.join('\n');
 }
 
 
@@ -31737,14 +31748,14 @@ function formatIssueComment(allIssues, newIssues, summary) {
         }
     }
     if (important.length > 0) {
-        sections.push('### 🟠 Important Issues', '');
+        sections.push('### 🟡 Important Issues', '');
         for (const issue of important) {
             const isNew = newIssues.includes(issue);
             sections.push(formatIssueItem(issue, isNew));
         }
     }
     if (suggestions.length > 0) {
-        sections.push('### 🟡 Suggestions', '');
+        sections.push('### 🟢 Suggestions', '');
         for (const issue of suggestions) {
             const isNew = newIssues.includes(issue);
             sections.push(formatIssueItem(issue, isNew));
@@ -32031,23 +32042,30 @@ async function run() {
     }
 }
 async function postResults(octokit, owner, repo, prNumber, headSha, allIssues, newIssues, filesAnalyzed, checkRunId, state) {
-    // Only create inline comments for CRITICAL and IMPORTANT
     const criticalAndImportant = newIssues.filter(i => i.severity === 'CRITICAL' || i.severity === 'IMPORTANT');
+    const suggestionsAndNits = newIssues.filter(i => i.severity === 'SUGGESTION' || i.severity === 'NIT');
     const filePatches = new Map();
     for (const file of filesAnalyzed) {
-        filePatches.set(file.filename, file.patch);
+        if (file.filename && file.patch) {
+            filePatches.set(file.filename, file.patch);
+        }
     }
-    // If we have CRITICAL/IMPORTANT issues, create review with inline comments
+    let postedSuccessfully = false;
     if (criticalAndImportant.length > 0) {
-        core.info(`Creating review with ${criticalAndImportant.length} inline comments`);
+        core.info(`Creating review with ${criticalAndImportant.length} CRITICAL/IMPORTANT issues`);
         try {
-            await (0, client_1.createReview)(octokit, owner, repo, prNumber, headSha, criticalAndImportant, allIssues, filePatches);
-            // Review created successfully - it contains all issues in the body
+            const result = await (0, client_1.createReview)(octokit, owner, repo, prNumber, headSha, criticalAndImportant, suggestionsAndNits, filePatches);
+            core.info(`Posted ${result.postedInlineCount} inline comments, ${result.failedInlineIssues.length} issues in body`);
+            postedSuccessfully = true;
         }
         catch (error) {
-            core.warning(`Failed to create inline review: ${error}`);
-            // Fall back to PR comment if review fails
+            core.warning(`Failed to create review: ${error instanceof Error ? error.message : String(error)}`);
+        }
+    }
+    if (!postedSuccessfully) {
+        try {
             if (allIssues.length > 0) {
+                core.info('Falling back to PR comment');
                 const comment = (0, comments_1.formatIssueComment)(allIssues, newIssues);
                 await (0, comments_1.createOrUpdateComment)(octokit, owner, repo, prNumber, comment);
             }
@@ -32055,19 +32073,16 @@ async function postResults(octokit, owner, repo, prNumber, headSha, allIssues, n
                 await (0, comments_1.createOrUpdateComment)(octokit, owner, repo, prNumber, (0, comments_1.formatNoIssuesComment)());
             }
         }
-    }
-    else {
-        // No CRITICAL/IMPORTANT - just post a comment with all issues
-        core.info('No CRITICAL/IMPORTANT issues, creating PR comment');
-        if (allIssues.length > 0) {
-            const comment = (0, comments_1.formatIssueComment)(allIssues, newIssues);
-            await (0, comments_1.createOrUpdateComment)(octokit, owner, repo, prNumber, comment);
-        }
-        else {
-            await (0, comments_1.createOrUpdateComment)(octokit, owner, repo, prNumber, (0, comments_1.formatNoIssuesComment)());
+        catch (error) {
+            core.warning(`Failed to create PR comment: ${error instanceof Error ? error.message : String(error)}`);
         }
     }
-    await (0, check_run_1.finalizeCheckRun)(octokit, owner, repo, checkRunId, state, newIssues.length);
+    try {
+        await (0, check_run_1.finalizeCheckRun)(octokit, owner, repo, checkRunId, state, newIssues.length);
+    }
+    catch (error) {
+        core.warning(`Failed to finalize check run: ${error instanceof Error ? error.message : String(error)}`);
+    }
 }
 run();
 
@@ -32676,7 +32691,7 @@ async function getPreviousCheckRunForPR(octokit, owner, repo, prNumber, headSha)
     const checkRunName = (0, types_1.getCheckRunName)(prNumber);
     try {
         // First try to find check run on current head SHA
-        let checkRuns = await octokit.rest.checks.listForRef({
+        const checkRuns = await octokit.rest.checks.listForRef({
             owner,
             repo,
             ref: headSha,
@@ -32688,12 +32703,6 @@ async function getPreviousCheckRunForPR(octokit, owner, repo, prNumber, headSha)
         // If not found on current SHA, we need to look at the PR's commit history
         if (!matchingRun) {
             core.info('No check run found on current SHA, searching in PR history...');
-            // Get the PR to find its base
-            const { data: pr } = await octokit.rest.pulls.get({
-                owner,
-                repo,
-                pull_number: prNumber,
-            });
             // List commits in the PR
             const { data: commits } = await octokit.rest.pulls.listCommits({
                 owner,

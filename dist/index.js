@@ -31434,11 +31434,28 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.getPRInfo = getPRInfo;
 exports.getPRFiles = getPRFiles;
-exports.getPRCommits = getPRCommits;
-exports.getPRHeadSha = getPRHeadSha;
+exports.getCommitsBetween = getCommitsBetween;
+exports.getFilesChangedBetween = getFilesChangedBetween;
+exports.getFileContent = getFileContent;
 exports.getReviewComments = getReviewComments;
 exports.createReview = createReview;
+const core = __importStar(__nccwpck_require__(7484));
+async function getPRInfo(octokit, owner, repo, prNumber) {
+    const { data: pr } = await octokit.rest.pulls.get({
+        owner,
+        repo,
+        pull_number: prNumber,
+    });
+    return {
+        number: pr.number,
+        draft: pr.draft || false,
+        headSha: pr.head.sha,
+        baseSha: pr.base.sha,
+        title: pr.title,
+    };
+}
 async function getPRFiles(octokit, owner, repo, prNumber) {
     const files = [];
     let page = 1;
@@ -31466,39 +31483,70 @@ async function getPRFiles(octokit, owner, repo, prNumber) {
     }
     return files;
 }
-async function getPRCommits(octokit, owner, repo, prNumber) {
+async function getCommitsBetween(octokit, owner, repo, baseSha, headSha) {
     const commits = [];
-    let page = 1;
-    const perPage = 100;
-    while (true) {
-        const { data } = await octokit.rest.pulls.listCommits({
+    try {
+        const { data: comparison } = await octokit.rest.repos.compareCommits({
             owner,
             repo,
-            pull_number: prNumber,
-            per_page: perPage,
-            page,
+            base: baseSha,
+            head: headSha,
         });
-        if (data.length === 0)
-            break;
-        for (const commit of data) {
-            commits.push({
-                sha: commit.sha,
-                message: commit.commit.message,
-            });
+        if (comparison.commits) {
+            for (const commit of comparison.commits) {
+                commits.push({
+                    sha: commit.sha,
+                    message: commit.commit.message,
+                });
+            }
         }
-        if (data.length < perPage)
-            break;
-        page++;
+    }
+    catch (error) {
+        core.warning(`Failed to compare commits: ${error}`);
     }
     return commits;
 }
-async function getPRHeadSha(octokit, owner, repo, prNumber) {
-    const { data: pr } = await octokit.rest.pulls.get({
-        owner,
-        repo,
-        pull_number: prNumber,
-    });
-    return pr.head.sha;
+async function getFilesChangedBetween(octokit, owner, repo, baseSha, headSha) {
+    const changedFiles = new Set();
+    try {
+        const { data: comparison } = await octokit.rest.repos.compareCommits({
+            owner,
+            repo,
+            base: baseSha,
+            head: headSha,
+        });
+        if (comparison.files) {
+            for (const file of comparison.files) {
+                if (file.status !== 'removed') {
+                    changedFiles.add(file.filename);
+                }
+                if (file.previous_filename && file.status === 'renamed') {
+                    changedFiles.add(file.previous_filename);
+                }
+            }
+        }
+    }
+    catch (error) {
+        core.warning(`Failed to get changed files: ${error}`);
+    }
+    return changedFiles;
+}
+async function getFileContent(octokit, owner, repo, path, ref) {
+    try {
+        const { data } = await octokit.rest.repos.getContent({
+            owner,
+            repo,
+            path,
+            ref,
+        });
+        if ('content' in data && data.type === 'file') {
+            return Buffer.from(data.content, 'base64').toString('utf-8');
+        }
+    }
+    catch (error) {
+        core.warning(`Failed to get file content for ${path}: ${error}`);
+    }
+    return '';
 }
 async function getReviewComments(octokit, owner, repo, prNumber) {
     const comments = [];
@@ -31629,13 +31677,12 @@ function formatInlineComment(issue) {
     }
     return lines.join('\n');
 }
-const core = __importStar(__nccwpck_require__(7484));
 
 
 /***/ }),
 
 /***/ 6645:
-/***/ ((__unused_webpack_module, exports) => {
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
 "use strict";
 
@@ -31643,6 +31690,9 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.createOrUpdateComment = createOrUpdateComment;
 exports.formatIssueComment = formatIssueComment;
 exports.formatNoIssuesComment = formatNoIssuesComment;
+exports.formatDraftSkipComment = formatDraftSkipComment;
+exports.formatNoChangesComment = formatNoChangesComment;
+const types_1 = __nccwpck_require__(9520);
 const COMMENT_IDENTIFIER = '<!-- a11y-review -->';
 async function createOrUpdateComment(octokit, owner, repo, prNumber, body) {
     const { data: comments } = await octokit.rest.issues.listComments({
@@ -31673,47 +31723,71 @@ async function createOrUpdateComment(octokit, owner, repo, prNumber, body) {
         return newComment.id;
     }
 }
-function formatIssueComment(issues, summary, newIssueCount = 0) {
+function formatIssueComment(allIssues, newIssues, summary) {
     const sections = [];
+    const total = Math.min(allIssues.length, types_1.MAX_ISSUES);
+    const newCount = newIssues.length;
     sections.push('## ♿ Accessibility Review', '');
     if (summary) {
         sections.push(`> ${summary}`, '');
     }
-    const total = issues.length;
-    const newLabel = newIssueCount > 0 ? ` (${newIssueCount} new)` : '';
+    const newLabel = newCount > 0 ? ` (${newCount} new since last analysis)` : '';
     sections.push(`**Found ${total} issue${total === 1 ? '' : 's'}${newLabel}:**`, '');
-    const critical = issues.filter(i => i.severity === 'CRITICAL');
-    const important = issues.filter(i => i.severity === 'IMPORTANT');
-    const suggestions = issues.filter(i => i.severity === 'SUGGESTION');
-    const nits = issues.filter(i => i.severity === 'NIT');
+    const persistedFiles = new Set();
+    for (const issue of allIssues) {
+        if (!newIssues.includes(issue)) {
+            persistedFiles.add(issue.file);
+        }
+    }
+    const newFiles = new Set();
+    for (const issue of newIssues) {
+        newFiles.add(issue.file);
+    }
+    const critical = allIssues.filter(i => i.severity === 'CRITICAL').slice(0, types_1.MAX_ISSUES);
+    const important = allIssues.filter(i => i.severity === 'IMPORTANT').slice(0, types_1.MAX_ISSUES);
+    const suggestions = allIssues.filter(i => i.severity === 'SUGGESTION').slice(0, types_1.MAX_ISSUES);
+    const nits = allIssues.filter(i => i.severity === 'NIT').slice(0, types_1.MAX_ISSUES);
     if (critical.length > 0) {
         sections.push('### 🔴 Critical Issues', '');
         for (const issue of critical) {
-            sections.push(formatIssueItem(issue));
+            sections.push(formatIssueItem(issue, newIssues));
         }
     }
     if (important.length > 0) {
         sections.push('### 🟠 Important Issues', '');
         for (const issue of important) {
-            sections.push(formatIssueItem(issue));
+            sections.push(formatIssueItem(issue, newIssues));
         }
     }
     if (suggestions.length > 0) {
         sections.push('### 🟡 Suggestions', '');
         for (const issue of suggestions) {
-            sections.push(formatIssueItem(issue));
+            sections.push(formatIssueItem(issue, newIssues));
         }
     }
     if (nits.length > 0) {
         sections.push('### ⚪ Minor Improvements', '');
         for (const issue of nits) {
-            sections.push(formatIssueItem(issue));
+            sections.push(formatIssueItem(issue, newIssues));
         }
     }
     sections.push('');
     sections.push('---');
     sections.push('*🤖 This review was automatically generated. Please verify all suggestions.*');
     return sections.join('\n');
+}
+function formatIssueItem(issue, newIssues) {
+    const lines = [];
+    const isNew = newIssues.includes(issue);
+    const newBadge = isNew ? ' ⚡ **NEW**' : '';
+    const location = issue.file + (issue.line ? `:${issue.line}` : '');
+    lines.push(`- **${location}**${newBadge} - ${issue.title || issue.description}`);
+    lines.push(`  - WCAG ${issue.wcag_criterion} (Level ${issue.wcag_level})`);
+    if (issue.suggestion) {
+        lines.push(`  - **Fix:** ${issue.suggestion}`);
+    }
+    lines.push('');
+    return lines.join('\n');
 }
 function formatNoIssuesComment(summary) {
     const lines = [
@@ -31723,7 +31797,7 @@ function formatNoIssuesComment(summary) {
     if (summary) {
         lines.push(`> ${summary}`, '');
     }
-    lines.push('No accessibility issues were found in this PR.');
+    lines.push('No accessibility issues were found.');
     lines.push('');
     lines.push('The changes appear to follow WCAG 2.1/2.2 guidelines.');
     lines.push('');
@@ -31731,16 +31805,27 @@ function formatNoIssuesComment(summary) {
     lines.push('*🤖 This review was automatically generated.*');
     return lines.join('\n');
 }
-function formatIssueItem(issue) {
-    const lines = [];
-    const location = issue.file + (issue.line ? `:${issue.line}` : '');
-    lines.push(`- **${location}** - ${issue.title || issue.description}`);
-    lines.push(`  - WCAG ${issue.wcag_criterion} (Level ${issue.wcag_level})`);
-    if (issue.suggestion) {
-        lines.push(`  - **Fix:** ${issue.suggestion}`);
-    }
-    lines.push('');
-    return lines.join('\n');
+function formatDraftSkipComment() {
+    return [
+        '## ♿ Accessibility Review',
+        '',
+        '⏸️ **Skipped** - This PR is a draft.',
+        '',
+        'Accessibility analysis will run when the PR is marked as ready for review.',
+        '',
+        '---',
+        '*🤖 This review was automatically generated.*',
+    ].join('\n');
+}
+function formatNoChangesComment() {
+    return [
+        '## ♿ Accessibility Review',
+        '',
+        'No new accessibility-relevant changes since last analysis.',
+        '',
+        '---',
+        '*🤖 This review was automatically generated.*',
+    ].join('\n');
 }
 
 
@@ -31787,8 +31872,7 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 const core = __importStar(__nccwpck_require__(7484));
 const github = __importStar(__nccwpck_require__(3228));
-const gemini_client_1 = __nccwpck_require__(1942);
-const ollama_client_1 = __nccwpck_require__(6849);
+const batch_1 = __nccwpck_require__(251);
 const prompts_1 = __nccwpck_require__(831);
 const diff_parser_1 = __nccwpck_require__(5597);
 const types_1 = __nccwpck_require__(9520);
@@ -31799,7 +31883,6 @@ async function run() {
     let octokit;
     let owner;
     let repo;
-    let prNumber;
     let checkRunId = null;
     try {
         core.info('Starting accessibility review...');
@@ -31818,7 +31901,7 @@ async function run() {
             core.setFailed('This action only works on pull_request events');
             return;
         }
-        prNumber = context.payload.pull_request?.number;
+        const prNumber = context.payload.pull_request?.number;
         owner = context.repo.owner;
         repo = context.repo.repo;
         if (!prNumber) {
@@ -31827,119 +31910,119 @@ async function run() {
         }
         core.info(`Reviewing PR #${prNumber} in ${owner}/${repo}`);
         octokit = github.getOctokit(token);
-        const headSha = await (0, client_1.getPRHeadSha)(octokit, owner, repo, prNumber);
-        core.info(`PR head SHA: ${headSha}`);
-        if (!checkRunId) {
-            checkRunId = await (0, check_run_1.createCheckRun)(octokit, owner, repo, headSha, prNumber);
+        const prInfo = await (0, client_1.getPRInfo)(octokit, owner, repo, prNumber);
+        core.info(`PR is draft: ${prInfo.draft}, head SHA: ${prInfo.headSha}`);
+        if (prInfo.draft) {
+            core.info('Skipping draft PR');
+            await (0, comments_1.createOrUpdateComment)(octokit, owner, repo, prNumber, (0, comments_1.formatDraftSkipComment)());
+            core.setOutput('issues-found', '0');
+            return;
         }
-        core.info('Fetching previous check run state...');
-        const previousRun = await (0, check_run_1.getPreviousCheckRunForPR)(octokit, owner, repo, prNumber, headSha);
+        checkRunId = await (0, check_run_1.createCheckRun)(octokit, owner, repo, prInfo.headSha, prNumber);
+        const previousRun = await (0, check_run_1.getPreviousCheckRunForPR)(octokit, owner, repo, prNumber, prInfo.headSha);
         if (previousRun) {
-            core.info(`Found previous run with ${previousRun.state.issueHashes.length} issue hashes`);
-            core.info(`Last analyzed SHA: ${previousRun.state.lastAnalyzedSha}`);
+            core.info(`Found previous run with ${Object.keys(previousRun.state.issuesByFile).length} files analyzed`);
         }
         else {
             core.info('No previous run found, this is the first analysis');
         }
-        core.info('Fetching PR files...');
-        const allFiles = await (0, client_1.getPRFiles)(octokit, owner, repo, prNumber);
-        core.info(`Fetched ${allFiles.length} total files in PR`);
-        const relevantFiles = allFiles.filter(f => f.patch && (0, diff_parser_1.isAccessibilityRelevant)(f.filename) && f.status !== 'removed');
-        core.info(`Found ${relevantFiles.length} accessibility-relevant files`);
-        if (relevantFiles.length === 0) {
-            core.info('No accessibility-relevant files found');
-            await (0, check_run_1.finalizeCheckRun)(octokit, owner, repo, checkRunId, 0, 0, headSha, [], []);
-            await (0, comments_1.createOrUpdateComment)(octokit, owner, repo, prNumber, (0, comments_1.formatNoIssuesComment)('No accessibility-relevant changes found.'));
-            core.setOutput('issues-found', '0');
-            return;
-        }
-        const diffContent = (0, diff_parser_1.formatDiffForAnalysis)(relevantFiles);
-        if (!diffContent.trim()) {
-            core.info('No relevant code changes found');
-            await (0, check_run_1.finalizeCheckRun)(octokit, owner, repo, checkRunId, 0, 0, headSha, [], []);
-            await (0, comments_1.createOrUpdateComment)(octokit, owner, repo, prNumber, (0, comments_1.formatNoIssuesComment)('No relevant code changes found.'));
-            core.setOutput('issues-found', '0');
-            return;
-        }
         const prompt = (0, prompts_1.buildPrompt)(owner, repo, prNumber);
-        core.info(`Analyzing with ${llmBackend} (${model})...`);
-        let issues;
-        let summary;
-        if (llmBackend === 'gemini') {
-            const client = new gemini_client_1.GeminiClient(apiKey, model);
-            const result = await client.analyze(diffContent, prompt);
-            issues = result.issues;
-            summary = result.summary;
+        let allIssues;
+        let newIssues;
+        let filesAnalyzed;
+        if (!previousRun) {
+            core.info('First run: Analyzing all PR files');
+            const allFiles = await (0, client_1.getPRFiles)(octokit, owner, repo, prNumber);
+            core.info(`Fetched ${allFiles.length} total files in PR`);
+            const relevantFiles = allFiles.filter(f => f.patch && (0, diff_parser_1.isAccessibilityRelevant)(f.filename) && f.status !== 'removed');
+            core.info(`Found ${relevantFiles.length} accessibility-relevant files`);
+            if (relevantFiles.length === 0) {
+                core.info('No accessibility-relevant files found');
+                const state = (0, check_run_1.createEmptyState)(prNumber, prInfo.headSha);
+                await (0, check_run_1.finalizeCheckRun)(octokit, owner, repo, checkRunId, state, 0);
+                await (0, comments_1.createOrUpdateComment)(octokit, owner, repo, prNumber, (0, comments_1.formatNoIssuesComment)('No accessibility-relevant changes found.'));
+                core.setOutput('issues-found', '0');
+                return;
+            }
+            const result = await (0, batch_1.analyzeFilesInBatches)(relevantFiles, llmBackend, apiKey, model, ollamaUrl, prompt);
+            allIssues = result.issues;
+            newIssues = result.issues;
+            filesAnalyzed = result.filesAnalyzed;
+            const issuesByFile = (0, types_1.groupIssuesByFile)(allIssues.slice(0, types_1.MAX_ISSUES));
+            const state = {
+                version: 1,
+                lastAnalyzedHeadSha: prInfo.headSha,
+                prNumber,
+                issuesByFile,
+            };
+            await postResults(octokit, owner, repo, prNumber, prInfo.headSha, allIssues, newIssues, relevantFiles, checkRunId, state);
         }
         else {
-            const client = new ollama_client_1.OllamaClient(ollamaUrl, model);
-            const result = await client.analyze(diffContent, prompt);
-            issues = result.issues;
-            summary = result.summary;
-        }
-        core.info(`LLM found ${issues.length} potential issues`);
-        for (const issue of issues) {
-            core.debug(`Raw issue: ${issue.file}:${issue.line} - severity="${issue.severity}" - ${issue.title}`);
-        }
-        const existingComments = await (0, client_1.getReviewComments)(octokit, owner, repo, prNumber);
-        core.info(`Found ${existingComments.length} existing review comments`);
-        const reanalyzedFiles = new Set(relevantFiles.map(f => f.filename));
-        const allIssueHashes = new Set(previousRun?.state.issueHashes || []);
-        for (const file of reanalyzedFiles) {
-            for (const hash of [...allIssueHashes]) {
-                if (hash.startsWith(file + ':')) {
-                    allIssueHashes.delete(hash);
+            core.info('Incremental run: Checking for new commits');
+            const changedFiles = await (0, client_1.getFilesChangedBetween)(octokit, owner, repo, previousRun.state.lastAnalyzedHeadSha, prInfo.headSha);
+            core.info(`Found ${changedFiles.size} files changed since last analysis`);
+            if (changedFiles.size === 0) {
+                core.info('No new commits since last analysis');
+                const existingIssues = (0, types_1.flattenIssues)(previousRun.state.issuesByFile);
+                await (0, check_run_1.finalizeCheckRun)(octokit, owner, repo, checkRunId, previousRun.state, 0);
+                if (existingIssues.length > 0) {
+                    await (0, comments_1.createOrUpdateComment)(octokit, owner, repo, prNumber, (0, comments_1.formatIssueComment)(existingIssues, [], 'No new changes since last analysis.'));
+                }
+                else {
+                    await (0, comments_1.createOrUpdateComment)(octokit, owner, repo, prNumber, (0, comments_1.formatNoChangesComment)());
+                }
+                core.setOutput('issues-found', String(existingIssues.length));
+                if (existingIssues.length > 0 && failOnIssues) {
+                    core.setFailed(`Found ${existingIssues.length} accessibility issue${existingIssues.length === 1 ? '' : 's'} from previous analysis`);
+                }
+                return;
+            }
+            const allPRFiles = await (0, client_1.getPRFiles)(octokit, owner, repo, prNumber);
+            const relevantChangedFiles = allPRFiles.filter(f => changedFiles.has(f.filename) && f.patch && (0, diff_parser_1.isAccessibilityRelevant)(f.filename) && f.status !== 'removed');
+            core.info(`Found ${relevantChangedFiles.length} relevant files to re-analyze`);
+            if (relevantChangedFiles.length === 0) {
+                core.info('No accessibility-relevant changes in new commits');
+                const existingIssues = (0, types_1.flattenIssues)(previousRun.state.issuesByFile);
+                const state = {
+                    ...previousRun.state,
+                    lastAnalyzedHeadSha: prInfo.headSha,
+                };
+                await (0, check_run_1.finalizeCheckRun)(octokit, owner, repo, checkRunId, state, 0);
+                if (existingIssues.length > 0) {
+                    await (0, comments_1.createOrUpdateComment)(octokit, owner, repo, prNumber, (0, comments_1.formatIssueComment)(existingIssues, [], 'No accessibility-relevant changes in recent commits.'));
+                }
+                else {
+                    await (0, comments_1.createOrUpdateComment)(octokit, owner, repo, prNumber, (0, comments_1.formatNoChangesComment)());
+                }
+                core.setOutput('issues-found', String(existingIssues.length));
+                if (existingIssues.length > 0 && failOnIssues) {
+                    core.setFailed(`Found ${existingIssues.length} accessibility issue${existingIssues.length === 1 ? '' : 's'} from previous analysis`);
+                }
+                return;
+            }
+            const result = await (0, batch_1.analyzeFilesInBatches)(relevantChangedFiles, llmBackend, apiKey, model, ollamaUrl, prompt);
+            newIssues = result.issues;
+            filesAnalyzed = result.filesAnalyzed;
+            const existingIssues = [];
+            for (const [file, issues] of Object.entries(previousRun.state.issuesByFile)) {
+                if (!changedFiles.has(file)) {
+                    existingIssues.push(...issues);
                 }
             }
+            allIssues = [...existingIssues, ...newIssues].slice(0, types_1.MAX_ISSUES);
+            const state = (0, check_run_1.updateStateWithNewIssues)(previousRun.state, (0, types_1.groupIssuesByFile)(newIssues), changedFiles, prInfo.headSha);
+            await postResults(octokit, owner, repo, prNumber, prInfo.headSha, allIssues, newIssues, relevantChangedFiles, checkRunId, state);
         }
-        const existingCommentHashes = new Set();
-        for (const comment of existingComments) {
-            const match = comment.body.match(/WCAG\s+(\d+\.\d+\.\d+)/);
-            if (match && comment.path) {
-                const titleMatch = comment.body.match(/\*\*(.+?)\*\*/);
-                const title = titleMatch ? titleMatch[1] : '';
-                const hash = `${comment.path}:${match[1]}:${title}`;
-                existingCommentHashes.add(hash);
-            }
-        }
-        const newIssues = [];
-        for (const issue of issues) {
-            const hash = (0, types_1.hashIssue)(issue);
-            if (!allIssueHashes.has(hash) && !existingCommentHashes.has(hash)) {
-                newIssues.push(issue);
-                allIssueHashes.add(hash);
-            }
-        }
-        core.info(`Found ${newIssues.length} new issues (of ${issues.length} total)`);
-        const allIssues = issues;
-        const criticalAndImportant = newIssues.filter(i => i.severity === 'CRITICAL' || i.severity === 'IMPORTANT');
-        const suggestionsAndNits = newIssues.filter(i => i.severity === 'SUGGESTION' || i.severity === 'NIT');
-        core.info(`New critical/important: ${criticalAndImportant.length}, new suggestions/nits: ${suggestionsAndNits.length}`);
-        if (criticalAndImportant.length > 0) {
-            core.info('Creating review with inline comments for new critical/important issues...');
-            const filePatches = new Map();
-            for (const file of relevantFiles) {
-                filePatches.set(file.filename, file.patch);
-            }
-            await (0, client_1.createReview)(octokit, owner, repo, prNumber, headSha, criticalAndImportant, filePatches);
-        }
-        if (suggestionsAndNits.length > 0 || criticalAndImportant.length > 0) {
-            const comment = (0, comments_1.formatIssueComment)(allIssues, summary, newIssues.length);
-            await (0, comments_1.createOrUpdateComment)(octokit, owner, repo, prNumber, comment);
-        }
-        else if (allIssues.length === 0) {
-            await (0, comments_1.createOrUpdateComment)(octokit, owner, repo, prNumber, (0, comments_1.formatNoIssuesComment)(summary));
-        }
-        await (0, check_run_1.finalizeCheckRun)(octokit, owner, repo, checkRunId, allIssues.length, newIssues.length, headSha, relevantFiles.map(f => f.filename), [...allIssueHashes]);
-        core.setOutput('issues-found', String(allIssues.length));
-        core.info(`Total issues: ${allIssues.length}, New issues: ${newIssues.length}`);
-        if (allIssues.length > 0 && failOnIssues) {
+        const totalIssues = Math.min(allIssues.length, types_1.MAX_ISSUES);
+        core.setOutput('issues-found', String(totalIssues));
+        core.info(`Total issues: ${totalIssues}, New issues: ${newIssues.length}`);
+        if (totalIssues > 0 && failOnIssues) {
             const criticalCount = allIssues.filter(i => i.severity === 'CRITICAL').length;
             const importantCount = allIssues.filter(i => i.severity === 'IMPORTANT').length;
             const suggestionCount = allIssues.filter(i => i.severity === 'SUGGESTION').length;
             const nitCount = allIssues.filter(i => i.severity === 'NIT').length;
-            let message = `Found ${allIssues.length} accessibility issue${allIssues.length === 1 ? '' : 's'}`;
-            if (newIssues.length > 0 && newIssues.length !== allIssues.length) {
+            let message = `Found ${totalIssues} accessibility issue${totalIssues === 1 ? '' : 's'}`;
+            if (newIssues.length > 0 && newIssues.length !== totalIssues) {
                 message += ` (${newIssues.length} new)`;
             }
             message += ':';
@@ -31964,7 +32047,122 @@ async function run() {
         }
     }
 }
+async function postResults(octokit, owner, repo, prNumber, headSha, allIssues, newIssues, filesAnalyzed, checkRunId, state) {
+    const criticalAndImportant = newIssues.filter(i => i.severity === 'CRITICAL' || i.severity === 'IMPORTANT');
+    if (criticalAndImportant.length > 0) {
+        core.info(`Creating review with ${criticalAndImportant.length} inline comments`);
+        const filePatches = new Map();
+        for (const file of filesAnalyzed) {
+            filePatches.set(file.filename, file.patch);
+        }
+        try {
+            await (0, client_1.createReview)(octokit, owner, repo, prNumber, headSha, criticalAndImportant, filePatches);
+        }
+        catch (error) {
+            core.warning(`Failed to create inline review: ${error}`);
+        }
+    }
+    if (allIssues.length > 0) {
+        const comment = (0, comments_1.formatIssueComment)(allIssues, newIssues);
+        await (0, comments_1.createOrUpdateComment)(octokit, owner, repo, prNumber, comment);
+    }
+    else {
+        await (0, comments_1.createOrUpdateComment)(octokit, owner, repo, prNumber, (0, comments_1.formatNoIssuesComment)());
+    }
+    await (0, check_run_1.finalizeCheckRun)(octokit, owner, repo, checkRunId, state, newIssues.length);
+}
 run();
+
+
+/***/ }),
+
+/***/ 251:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.analyzeFilesInBatches = analyzeFilesInBatches;
+const core = __importStar(__nccwpck_require__(7484));
+const gemini_client_1 = __nccwpck_require__(1942);
+const ollama_client_1 = __nccwpck_require__(6849);
+const types_1 = __nccwpck_require__(9520);
+const diff_parser_1 = __nccwpck_require__(5597);
+async function analyzeFilesInBatches(files, llmBackend, apiKey, model, ollamaUrl, prompt) {
+    const allIssues = [];
+    const filesAnalyzed = [];
+    const batches = [];
+    for (let i = 0; i < files.length; i += types_1.BATCH_SIZE) {
+        batches.push(files.slice(i, i + types_1.BATCH_SIZE));
+    }
+    core.info(`Analyzing ${files.length} files in ${batches.length} batch(es)`);
+    const client = llmBackend === 'gemini'
+        ? new gemini_client_1.GeminiClient(apiKey, model)
+        : new ollama_client_1.OllamaClient(ollamaUrl, model);
+    for (let i = 0; i < batches.length; i++) {
+        const batch = batches[i];
+        const batchNum = i + 1;
+        core.info(`Analyzing batch ${batchNum}/${batches.length} (${batch.length} files)`);
+        const diffContent = (0, diff_parser_1.formatDiffForAnalysis)(batch);
+        if (!diffContent.trim()) {
+            core.info(`Batch ${batchNum} has no relevant content, skipping`);
+            continue;
+        }
+        try {
+            const result = await client.analyze(diffContent, prompt);
+            for (const issue of result.issues) {
+                allIssues.push(issue);
+            }
+            for (const file of batch) {
+                filesAnalyzed.push(file.filename);
+            }
+            core.info(`Batch ${batchNum}: Found ${result.issues.length} issues`);
+            if (batches.length > 1 && i < batches.length - 1) {
+                await new Promise(resolve => setTimeout(resolve, 1000));
+            }
+        }
+        catch (error) {
+            core.warning(`Batch ${batchNum} failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+    }
+    return {
+        issues: allIssues,
+        filesAnalyzed,
+    };
+}
 
 
 /***/ }),
@@ -32471,15 +32669,17 @@ var __importStar = (this && this.__importStar) || (function () {
 })();
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.createCheckRun = createCheckRun;
-exports.getPreviousCheckRun = getPreviousCheckRun;
 exports.getPreviousCheckRunForPR = getPreviousCheckRunForPR;
 exports.updateCheckRun = updateCheckRun;
 exports.finalizeCheckRun = finalizeCheckRun;
 exports.serializeState = serializeState;
 exports.deserializeState = deserializeState;
+exports.createEmptyState = createEmptyState;
+exports.updateStateWithNewIssues = updateStateWithNewIssues;
 const core = __importStar(__nccwpck_require__(7484));
 const types_1 = __nccwpck_require__(9520);
 const CHECK_RUN_TITLE = 'Accessibility Review';
+const STATE_VERSION = 1;
 async function createCheckRun(octokit, owner, repo, headSha, prNumber) {
     const checkRunName = (0, types_1.getCheckRunName)(prNumber);
     const { data: checkRun } = await octokit.rest.checks.create({
@@ -32498,32 +32698,6 @@ async function createCheckRun(octokit, owner, repo, headSha, prNumber) {
     core.info(`Created check run ${checkRun.id}`);
     return checkRun.id;
 }
-async function getPreviousCheckRun(octokit, owner, repo, prNumber) {
-    const checkRunName = (0, types_1.getCheckRunName)(prNumber);
-    try {
-        const { data: checkRuns } = await octokit.rest.checks.listForRef({
-            owner,
-            repo,
-            ref: 'refs/heads/' + await getDefaultBranch(octokit, owner, repo),
-            status: 'completed',
-            per_page: 100,
-        });
-        const matchingRun = checkRuns.check_runs.find((run) => run.name === checkRunName && run.status === 'completed');
-        if (!matchingRun)
-            return null;
-        if (!matchingRun.output?.text)
-            return null;
-        const state = deserializeState(matchingRun.output.text);
-        return {
-            checkRunId: matchingRun.id,
-            state,
-        };
-    }
-    catch (error) {
-        core.warning(`Failed to get previous check run for PR: ${error}`);
-        return null;
-    }
-}
 async function getPreviousCheckRunForPR(octokit, owner, repo, prNumber, headSha) {
     const checkRunName = (0, types_1.getCheckRunName)(prNumber);
     try {
@@ -32539,6 +32713,10 @@ async function getPreviousCheckRunForPR(octokit, owner, repo, prNumber, headSha)
         if (!matchingRun.output?.text)
             return null;
         const state = deserializeState(matchingRun.output.text);
+        if (state.version !== STATE_VERSION) {
+            core.info('State version mismatch, treating as first run');
+            return null;
+        }
         return {
             checkRunId: matchingRun.id,
             state,
@@ -32566,15 +32744,11 @@ async function updateCheckRun(octokit, owner, repo, checkRunId, conclusion, stat
     });
     core.info(`Updated check run ${checkRunId} with conclusion: ${conclusion}`);
 }
-async function finalizeCheckRun(octokit, owner, repo, checkRunId, totalIssues, newIssues, headSha, analyzedFiles, allIssueHashes) {
+async function finalizeCheckRun(octokit, owner, repo, checkRunId, state, newIssueCount) {
+    const totalIssues = (0, types_1.flattenIssues)(state.issuesByFile).length;
     const conclusion = totalIssues > 0 ? 'failure' : 'success';
-    const state = {
-        lastAnalyzedSha: headSha,
-        analyzedFiles,
-        issueHashes: allIssueHashes.slice(0, 500),
-    };
     const summary = totalIssues > 0
-        ? `Found ${totalIssues} accessibility issue${totalIssues === 1 ? '' : 's'} (${newIssues} new)`
+        ? `Found ${totalIssues} accessibility issue${totalIssues === 1 ? '' : 's'}${newIssueCount > 0 ? ` (${newIssueCount} new)` : ''}`
         : 'No accessibility issues found';
     await updateCheckRun(octokit, owner, repo, checkRunId, conclusion, state, summary);
 }
@@ -32584,31 +32758,42 @@ function serializeState(state) {
 function deserializeState(json) {
     try {
         const parsed = JSON.parse(json);
+        if (parsed.version !== STATE_VERSION) {
+            return createEmptyState(0, '');
+        }
         return {
-            lastAnalyzedSha: parsed.lastAnalyzedSha || '',
-            analyzedFiles: parsed.analyzedFiles || [],
-            issueHashes: parsed.issueHashes || [],
+            version: parsed.version || STATE_VERSION,
+            lastAnalyzedHeadSha: parsed.lastAnalyzedHeadSha || '',
+            prNumber: parsed.prNumber || 0,
+            issuesByFile: parsed.issuesByFile || {},
         };
     }
     catch {
-        return {
-            lastAnalyzedSha: '',
-            analyzedFiles: [],
-            issueHashes: [],
-        };
+        return createEmptyState(0, '');
     }
 }
-async function getDefaultBranch(octokit, owner, repo) {
-    try {
-        const { data: repository } = await octokit.rest.repos.get({
-            owner,
-            repo,
-        });
-        return repository.default_branch;
+function createEmptyState(prNumber, headSha) {
+    return {
+        version: STATE_VERSION,
+        lastAnalyzedHeadSha: headSha,
+        prNumber,
+        issuesByFile: {},
+    };
+}
+function updateStateWithNewIssues(previousState, newIssuesByFile, filesReanalyzed, newHeadSha) {
+    const newIssuesByFileCopy = { ...previousState.issuesByFile };
+    for (const file of filesReanalyzed) {
+        delete newIssuesByFileCopy[file];
     }
-    catch {
-        return 'main';
+    for (const [file, issues] of Object.entries(newIssuesByFile)) {
+        newIssuesByFileCopy[file] = issues;
     }
+    return {
+        version: STATE_VERSION,
+        lastAnalyzedHeadSha: newHeadSha,
+        prNumber: previousState.prNumber,
+        issuesByFile: newIssuesByFileCopy,
+    };
 }
 
 
@@ -32620,9 +32805,12 @@ async function getDefaultBranch(octokit, owner, repo) {
 "use strict";
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.BATCH_SIZE = exports.MAX_ISSUES = void 0;
 exports.getCheckRunName = getCheckRunName;
 exports.hashIssue = hashIssue;
 exports.parseIssueHash = parseIssueHash;
+exports.groupIssuesByFile = groupIssuesByFile;
+exports.flattenIssues = flattenIssues;
 const CHECK_RUN_NAME_PREFIX = 'Accessibility Review';
 function getCheckRunName(prNumber) {
     return `${CHECK_RUN_NAME_PREFIX} (PR #${prNumber})`;
@@ -32641,6 +32829,25 @@ function parseIssueHash(hash) {
         title: parts.slice(2).join(':'),
     };
 }
+function groupIssuesByFile(issues) {
+    const grouped = {};
+    for (const issue of issues) {
+        if (!grouped[issue.file]) {
+            grouped[issue.file] = [];
+        }
+        grouped[issue.file].push(issue);
+    }
+    return grouped;
+}
+function flattenIssues(issuesByFile) {
+    const allIssues = [];
+    for (const issues of Object.values(issuesByFile)) {
+        allIssues.push(...issues);
+    }
+    return allIssues;
+}
+exports.MAX_ISSUES = 100;
+exports.BATCH_SIZE = 20;
 
 
 /***/ }),

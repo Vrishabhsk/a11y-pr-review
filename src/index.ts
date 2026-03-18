@@ -2,27 +2,38 @@ import * as core from '@actions/core';
 import * as github from '@actions/github';
 import { GeminiClient } from './llm/gemini-client';
 import { OllamaClient } from './llm/ollama-client';
+import { analyzeFilesInBatches } from './llm/batch';
 import { buildPrompt } from './prompts';
-import { isAccessibilityRelevant, formatDiffForAnalysis } from './parsers/diff-parser';
-import { 
-  A11yIssue, 
-  CheckRunState, 
-  hashIssue,
-  getCheckRunName,
-  FilePatch 
+import { isAccessibilityRelevant } from './parsers/diff-parser';
+import {
+  A11yIssue,
+  CheckRunState,
+  FilePatch,
+  MAX_ISSUES,
+  groupIssuesByFile,
+  flattenIssues,
 } from './state/types';
-import { 
-  createCheckRun, 
+import {
+  createCheckRun,
   getPreviousCheckRunForPR,
-  finalizeCheckRun
+  finalizeCheckRun,
+  createEmptyState,
+  updateStateWithNewIssues,
 } from './state/check-run';
-import { 
-  getPRFiles, 
-  getPRHeadSha, 
-  getReviewComments, 
-  createReview 
+import {
+  getPRInfo,
+  getPRFiles,
+  getFilesChangedBetween,
+  getReviewComments,
+  createReview,
 } from './github/client';
-import { createOrUpdateComment, formatIssueComment, formatNoIssuesComment } from './github/comments';
+import {
+  createOrUpdateComment,
+  formatIssueComment,
+  formatNoIssuesComment,
+  formatDraftSkipComment,
+  formatNoChangesComment,
+} from './github/comments';
 
 type Octokit = ReturnType<typeof github.getOctokit>;
 
@@ -30,7 +41,6 @@ async function run(): Promise<void> {
   let octokit: Octokit;
   let owner: string;
   let repo: string;
-  let prNumber: number;
   let checkRunId: number | null = null;
 
   try {
@@ -54,7 +64,7 @@ async function run(): Promise<void> {
       return;
     }
 
-    prNumber = context.payload.pull_request?.number as number;
+    const prNumber = context.payload.pull_request?.number as number;
     owner = context.repo.owner;
     repo = context.repo.repo;
 
@@ -67,168 +77,214 @@ async function run(): Promise<void> {
 
     octokit = github.getOctokit(token);
 
-    const headSha = await getPRHeadSha(octokit, owner, repo, prNumber);
-    core.info(`PR head SHA: ${headSha}`);
+    const prInfo = await getPRInfo(octokit, owner, repo, prNumber);
+    core.info(`PR is draft: ${prInfo.draft}, head SHA: ${prInfo.headSha}`);
 
-    if (!checkRunId) {
-      checkRunId = await createCheckRun(octokit, owner, repo, headSha, prNumber);
+    if (prInfo.draft) {
+      core.info('Skipping draft PR');
+      await createOrUpdateComment(octokit, owner, repo, prNumber, formatDraftSkipComment());
+      core.setOutput('issues-found', '0');
+      return;
     }
 
-    core.info('Fetching previous check run state...');
-    const previousRun = await getPreviousCheckRunForPR(octokit, owner, repo, prNumber, headSha);
+    checkRunId = await createCheckRun(octokit, owner, repo, prInfo.headSha, prNumber);
+
+    const previousRun = await getPreviousCheckRunForPR(octokit, owner, repo, prNumber, prInfo.headSha);
 
     if (previousRun) {
-      core.info(`Found previous run with ${previousRun.state.issueHashes.length} issue hashes`);
-      core.info(`Last analyzed SHA: ${previousRun.state.lastAnalyzedSha}`);
+      core.info(`Found previous run with ${Object.keys(previousRun.state.issuesByFile).length} files analyzed`);
     } else {
       core.info('No previous run found, this is the first analysis');
     }
 
-    core.info('Fetching PR files...');
-    const allFiles = await getPRFiles(octokit, owner, repo, prNumber);
-    core.info(`Fetched ${allFiles.length} total files in PR`);
-
-    const relevantFiles = allFiles.filter(f => f.patch && isAccessibilityRelevant(f.filename) && f.status !== 'removed');
-    core.info(`Found ${relevantFiles.length} accessibility-relevant files`);
-
-    if (relevantFiles.length === 0) {
-      core.info('No accessibility-relevant files found');
-      await finalizeCheckRun(octokit, owner, repo, checkRunId, 0, 0, headSha, [], []);
-      await createOrUpdateComment(octokit, owner, repo, prNumber, formatNoIssuesComment('No accessibility-relevant changes found.'));
-      core.setOutput('issues-found', '0');
-      return;
-    }
-
-    const diffContent = formatDiffForAnalysis(relevantFiles);
-
-    if (!diffContent.trim()) {
-      core.info('No relevant code changes found');
-      await finalizeCheckRun(octokit, owner, repo, checkRunId, 0, 0, headSha, [], []);
-      await createOrUpdateComment(octokit, owner, repo, prNumber, formatNoIssuesComment('No relevant code changes found.'));
-      core.setOutput('issues-found', '0');
-      return;
-    }
-
     const prompt = buildPrompt(owner, repo, prNumber);
-    core.info(`Analyzing with ${llmBackend} (${model})...`);
+    let allIssues: A11yIssue[];
+    let newIssues: A11yIssue[];
+    let filesAnalyzed: string[];
 
-    let issues: A11yIssue[];
-    let summary: string;
-
-    if (llmBackend === 'gemini') {
-      const client = new GeminiClient(apiKey, model);
-      const result = await client.analyze(diffContent, prompt);
-      issues = result.issues;
-      summary = result.summary;
-    } else {
-      const client = new OllamaClient(ollamaUrl, model);
-      const result = await client.analyze(diffContent, prompt);
-      issues = result.issues;
-      summary = result.summary;
-    }
-
-    core.info(`LLM found ${issues.length} potential issues`);
-
-    for (const issue of issues) {
-      core.debug(`Raw issue: ${issue.file}:${issue.line} - severity="${issue.severity}" - ${issue.title}`);
-    }
-
-    const existingComments = await getReviewComments(octokit, owner, repo, prNumber);
-    core.info(`Found ${existingComments.length} existing review comments`);
-
-    const reanalyzedFiles = new Set(relevantFiles.map(f => f.filename));
-
-    const allIssueHashes = new Set(previousRun?.state.issueHashes || []);
-
-    for (const file of reanalyzedFiles) {
-      for (const hash of [...allIssueHashes]) {
-        if (hash.startsWith(file + ':')) {
-          allIssueHashes.delete(hash);
-        }
-      }
-    }
-
-    const existingCommentHashes = new Set<string>();
-    for (const comment of existingComments) {
-      const match = comment.body.match(/WCAG\s+(\d+\.\d+\.\d+)/);
-      if (match && comment.path) {
-        const titleMatch = comment.body.match(/\*\*(.+?)\*\*/);
-        const title = titleMatch ? titleMatch[1] : '';
-        const hash = `${comment.path}:${match[1]}:${title}`;
-        existingCommentHashes.add(hash);
-      }
-    }
-
-    const newIssues: A11yIssue[] = [];
-    for (const issue of issues) {
-      const hash = hashIssue(issue);
-      if (!allIssueHashes.has(hash) && !existingCommentHashes.has(hash)) {
-        newIssues.push(issue);
-        allIssueHashes.add(hash);
-      }
-    }
-
-    core.info(`Found ${newIssues.length} new issues (of ${issues.length} total)`);
-
-    const allIssues = issues;
-
-    const criticalAndImportant = newIssues.filter(
-      i => i.severity === 'CRITICAL' || i.severity === 'IMPORTANT'
-    );
-    const suggestionsAndNits = newIssues.filter(
-      i => i.severity === 'SUGGESTION' || i.severity === 'NIT'
-    );
-
-    core.info(`New critical/important: ${criticalAndImportant.length}, new suggestions/nits: ${suggestionsAndNits.length}`);
-
-    if (criticalAndImportant.length > 0) {
-      core.info('Creating review with inline comments for new critical/important issues...');
-      const filePatches = new Map<string, string>();
-      for (const file of relevantFiles) {
-        filePatches.set(file.filename, file.patch);
-      }
+    if (!previousRun) {
+      core.info('First run: Analyzing all PR files');
       
-      await createReview(
+      const allFiles = await getPRFiles(octokit, owner, repo, prNumber);
+      core.info(`Fetched ${allFiles.length} total files in PR`);
+
+      const relevantFiles = allFiles.filter(
+        f => f.patch && isAccessibilityRelevant(f.filename) && f.status !== 'removed'
+      );
+      core.info(`Found ${relevantFiles.length} accessibility-relevant files`);
+
+      if (relevantFiles.length === 0) {
+        core.info('No accessibility-relevant files found');
+        const state = createEmptyState(prNumber, prInfo.headSha);
+        await finalizeCheckRun(octokit, owner, repo, checkRunId, state, 0);
+        await createOrUpdateComment(octokit, owner, repo, prNumber, formatNoIssuesComment('No accessibility-relevant changes found.'));
+        core.setOutput('issues-found', '0');
+        return;
+      }
+
+      const result = await analyzeFilesInBatches(
+        relevantFiles,
+        llmBackend,
+        apiKey,
+        model,
+        ollamaUrl,
+        prompt
+      );
+
+      allIssues = result.issues;
+      newIssues = result.issues;
+      filesAnalyzed = result.filesAnalyzed;
+
+      const issuesByFile = groupIssuesByFile(allIssues.slice(0, MAX_ISSUES));
+      const state: CheckRunState = {
+        version: 1,
+        lastAnalyzedHeadSha: prInfo.headSha,
+        prNumber,
+        issuesByFile,
+      };
+
+      await postResults(
         octokit,
         owner,
         repo,
         prNumber,
-        headSha,
-        criticalAndImportant,
-        filePatches
+        prInfo.headSha,
+        allIssues,
+        newIssues,
+        relevantFiles,
+        checkRunId,
+        state
+      );
+
+    } else {
+      core.info('Incremental run: Checking for new commits');
+
+      const changedFiles = await getFilesChangedBetween(
+        octokit,
+        owner,
+        repo,
+        previousRun.state.lastAnalyzedHeadSha,
+        prInfo.headSha
+      );
+
+      core.info(`Found ${changedFiles.size} files changed since last analysis`);
+
+      if (changedFiles.size === 0) {
+        core.info('No new commits since last analysis');
+        const existingIssues = flattenIssues(previousRun.state.issuesByFile);
+        await finalizeCheckRun(octokit, owner, repo, checkRunId, previousRun.state, 0);
+        
+        if (existingIssues.length > 0) {
+          await createOrUpdateComment(
+            octokit,
+            owner,
+            repo,
+            prNumber,
+            formatIssueComment(existingIssues, [], 'No new changes since last analysis.')
+          );
+        } else {
+          await createOrUpdateComment(octokit, owner, repo, prNumber, formatNoChangesComment());
+        }
+        
+        core.setOutput('issues-found', String(existingIssues.length));
+        
+        if (existingIssues.length > 0 && failOnIssues) {
+          core.setFailed(`Found ${existingIssues.length} accessibility issue${existingIssues.length === 1 ? '' : 's'} from previous analysis`);
+        }
+        return;
+      }
+
+      const allPRFiles = await getPRFiles(octokit, owner, repo, prNumber);
+      const relevantChangedFiles = allPRFiles.filter(
+        f => changedFiles.has(f.filename) && f.patch && isAccessibilityRelevant(f.filename) && f.status !== 'removed'
+      );
+
+      core.info(`Found ${relevantChangedFiles.length} relevant files to re-analyze`);
+
+      if (relevantChangedFiles.length === 0) {
+        core.info('No accessibility-relevant changes in new commits');
+        const existingIssues = flattenIssues(previousRun.state.issuesByFile);
+        const state: CheckRunState = {
+          ...previousRun.state,
+          lastAnalyzedHeadSha: prInfo.headSha,
+        };
+        
+        await finalizeCheckRun(octokit, owner, repo, checkRunId, state, 0);
+        
+        if (existingIssues.length > 0) {
+          await createOrUpdateComment(
+            octokit,
+            owner,
+            repo,
+            prNumber,
+            formatIssueComment(existingIssues, [], 'No accessibility-relevant changes in recent commits.')
+          );
+        } else {
+          await createOrUpdateComment(octokit, owner, repo, prNumber, formatNoChangesComment());
+        }
+        
+        core.setOutput('issues-found', String(existingIssues.length));
+        
+        if (existingIssues.length > 0 && failOnIssues) {
+          core.setFailed(`Found ${existingIssues.length} accessibility issue${existingIssues.length === 1 ? '' : 's'} from previous analysis`);
+        }
+        return;
+      }
+
+      const result = await analyzeFilesInBatches(
+        relevantChangedFiles,
+        llmBackend,
+        apiKey,
+        model,
+        ollamaUrl,
+        prompt
+      );
+
+      newIssues = result.issues;
+      filesAnalyzed = result.filesAnalyzed;
+
+      const existingIssues: A11yIssue[] = [];
+      for (const [file, issues] of Object.entries(previousRun.state.issuesByFile)) {
+        if (!changedFiles.has(file)) {
+          existingIssues.push(...(issues as A11yIssue[]));
+        }
+      }
+
+      allIssues = [...existingIssues, ...newIssues].slice(0, MAX_ISSUES);
+
+      const state = updateStateWithNewIssues(
+        previousRun.state,
+        groupIssuesByFile(newIssues),
+        changedFiles,
+        prInfo.headSha
+      );
+
+      await postResults(
+        octokit,
+        owner,
+        repo,
+        prNumber,
+        prInfo.headSha,
+        allIssues,
+        newIssues,
+        relevantChangedFiles,
+        checkRunId,
+        state
       );
     }
 
-    if (suggestionsAndNits.length > 0 || criticalAndImportant.length > 0) {
-      const comment = formatIssueComment(allIssues, summary, newIssues.length);
-      await createOrUpdateComment(octokit, owner, repo, prNumber, comment);
-    } else if (allIssues.length === 0) {
-      await createOrUpdateComment(octokit, owner, repo, prNumber, formatNoIssuesComment(summary));
-    }
+    const totalIssues = Math.min(allIssues.length, MAX_ISSUES);
+    core.setOutput('issues-found', String(totalIssues));
+    core.info(`Total issues: ${totalIssues}, New issues: ${newIssues.length}`);
 
-    await finalizeCheckRun(
-      octokit,
-      owner,
-      repo,
-      checkRunId,
-      allIssues.length,
-      newIssues.length,
-      headSha,
-      relevantFiles.map(f => f.filename),
-      [...allIssueHashes] as string[]
-    );
-
-    core.setOutput('issues-found', String(allIssues.length));
-    core.info(`Total issues: ${allIssues.length}, New issues: ${newIssues.length}`);
-
-    if (allIssues.length > 0 && failOnIssues) {
+    if (totalIssues > 0 && failOnIssues) {
       const criticalCount = allIssues.filter(i => i.severity === 'CRITICAL').length;
       const importantCount = allIssues.filter(i => i.severity === 'IMPORTANT').length;
       const suggestionCount = allIssues.filter(i => i.severity === 'SUGGESTION').length;
       const nitCount = allIssues.filter(i => i.severity === 'NIT').length;
 
-      let message = `Found ${allIssues.length} accessibility issue${allIssues.length === 1 ? '' : 's'}`;
-      if (newIssues.length > 0 && newIssues.length !== allIssues.length) {
+      let message = `Found ${totalIssues} accessibility issue${totalIssues === 1 ? '' : 's'}`;
+      if (newIssues.length > 0 && newIssues.length !== totalIssues) {
         message += ` (${newIssues.length} new)`;
       }
       message += ':';
@@ -250,6 +306,55 @@ async function run(): Promise<void> {
       core.debug(`Stack trace: ${error.stack}`);
     }
   }
+}
+
+async function postResults(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  prNumber: number,
+  headSha: string,
+  allIssues: A11yIssue[],
+  newIssues: A11yIssue[],
+  filesAnalyzed: FilePatch[],
+  checkRunId: number,
+  state: CheckRunState
+): Promise<void> {
+  const criticalAndImportant = newIssues.filter(
+    i => i.severity === 'CRITICAL' || i.severity === 'IMPORTANT'
+  );
+
+  if (criticalAndImportant.length > 0) {
+    core.info(`Creating review with ${criticalAndImportant.length} inline comments`);
+    
+    const filePatches = new Map<string, string>();
+    for (const file of filesAnalyzed) {
+      filePatches.set(file.filename, file.patch);
+    }
+
+    try {
+      await createReview(
+        octokit,
+        owner,
+        repo,
+        prNumber,
+        headSha,
+        criticalAndImportant,
+        filePatches
+      );
+    } catch (error) {
+      core.warning(`Failed to create inline review: ${error}`);
+    }
+  }
+
+  if (allIssues.length > 0) {
+    const comment = formatIssueComment(allIssues, newIssues);
+    await createOrUpdateComment(octokit, owner, repo, prNumber, comment);
+  } else {
+    await createOrUpdateComment(octokit, owner, repo, prNumber, formatNoIssuesComment());
+  }
+
+  await finalizeCheckRun(octokit, owner, repo, checkRunId, state, newIssues.length);
 }
 
 run();

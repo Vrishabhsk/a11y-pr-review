@@ -10,9 +10,10 @@ export interface A11yIssue {
 }
 
 export interface CheckRunState {
-  lastAnalyzedSha: string;
-  analyzedFiles: string[];
-  issueHashes: string[];
+  version: number;
+  lastAnalyzedHeadSha: string;
+  prNumber: number;
+  issuesByFile: Record<string, A11yIssue[]>;
 }
 
 export interface PreviousRun {
@@ -26,11 +27,24 @@ export interface FilePatch {
   status: 'added' | 'modified' | 'removed' | 'renamed';
 }
 
+export interface PRInfo {
+  number: number;
+  draft: boolean;
+  headSha: string;
+  baseSha: string;
+  title?: string;
+}
+
 export interface ReviewCommentInfo {
   id: number;
   path: string;
   line: number | null;
   body: string;
+}
+
+export interface CommitInfo {
+  sha: string;
+  message: string;
 }
 
 const CHECK_RUN_NAME_PREFIX = 'Accessibility Review';
@@ -53,3 +67,25 @@ export function parseIssueHash(hash: string): { file: string; wcag_criterion: st
     title: parts.slice(2).join(':'),
   };
 }
+
+export function groupIssuesByFile(issues: A11yIssue[]): Record<string, A11yIssue[]> {
+  const grouped: Record<string, A11yIssue[]> = {};
+  for (const issue of issues) {
+    if (!grouped[issue.file]) {
+      grouped[issue.file] = [];
+    }
+    grouped[issue.file].push(issue);
+  }
+  return grouped;
+}
+
+export function flattenIssues(issuesByFile: Record<string, A11yIssue[]>): A11yIssue[] {
+  const allIssues: A11yIssue[] = [];
+  for (const issues of Object.values(issuesByFile)) {
+    allIssues.push(...issues);
+  }
+  return allIssues;
+}
+
+export const MAX_ISSUES = 100;
+export const BATCH_SIZE = 20;

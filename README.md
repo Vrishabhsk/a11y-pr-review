@@ -6,19 +6,52 @@ A GitHub Action that automatically reviews pull requests for accessibility (WCAG
 
 - **WCAG Compliance**: Analyzes code for WCAG 2.1 and WCAG 2.2 Level A/AA violations
 - **Dual LLM Backend**: Supports Google Gemini API and self-hosted Ollama
-- **Incremental Analysis**: Only analyzes files changed since the last run
-- **Smart Deduplication**: Won't re-report the same issue twice across commits
+- **Incremental Analysis**: 
+  - First run: Analyzes ALL files in PR
+  - Subsequent runs: Only analyzes files changed since last run
+- **Smart Deduplication**: 
+  - Issues from untouched files PERSIST (not re-analyzed)
+  - Re-analyzed files: Old issues replaced, new issues reported
+  - Hash: `file:wcag_criterion:title` (line not included)
 - **Smart Feedback**:
-  - 🔴 **CRITICAL** & 🟠 **IMPORTANT** → Posted as **inline review comments** on specific lines
-  - 🟡 **SUGGESTION** & ⚪ **NIT** → Posted as a single **aggregated PR comment**
-- **Fails on Issues**: Configurable failure when accessibility issues are found
+  - 🔴 **CRITICAL** & 🟠 **IMPORTANT** → Inline review comments
+  - 🟡 **SUGGESTION** & ⚪ **NIT** → Aggregated PR comment
+- **Draft PR Support**: Skips draft PRs automatically
+- **Batch Processing**: Files analyzed in batches of 20 for efficiency
+- **Fails on Issues**: Configurable failure when issues found
 
 ## How It Works
 
-1. **First Run**: Analyzes all files in the PR
-2. **Subsequent Runs**: Only analyzes files changed since the last run
-3. **Deduplication**: Uses issue hashes (`file:wcag_criterion:title`) to avoid re-reporting
-4. **Re-analysis**: If a file is modified again, re-analyzes it and updates issues for that file
+### First Run
+```
+PR opened → Analyze ALL changed files → Store state in Check Run
+                                     → Post comments/reviews
+                                     → Save analyzed files + issues
+```
+
+### Subsequent Runs
+```
+New commits pushed → Get commits since last run
+                  → Find changed files
+                  → For touched files: Re-analyze, replace old issues
+                  → For untouched files: PERSIST old issues
+                  → Post NEW issues as inline comments
+                  → Update comment with ALL issues (new + persisted)
+```
+
+### State Storage
+State is persisted in GitHub Check Run's `output.text` field:
+```json
+{
+  "version": 1,
+  "lastAnalyzedHeadSha": "abc123...",
+  "prNumber": 42,
+  "issuesByFile": {
+    "src/Button.tsx": [{ "file": "...", "line": 10, ... }],
+    "src/Form.tsx": [{ "file": "...", "line": 25, ... }]
+  }
+}
+```
 
 ## Usage
 
@@ -48,8 +81,6 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           llm-backend: 'gemini'
           api-key: ${{ secrets.GEMINI_API_KEY }}
-          # model: 'gemini-2.0-flash'  # optional
-          # fail-on-issues: 'true'     # optional, defaults to true
 ```
 
 ### With Ollama (Self-Hosted)
@@ -68,7 +99,7 @@ permissions:
 
 jobs:
   a11y-review:
-    runs-on: self-hosted  # Requires a runner with Ollama
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
       
@@ -106,50 +137,35 @@ jobs:
 | Level | Description | Feedback Type |
 |-------|-------------|---------------|
 | 🔴 **CRITICAL** | Blocks screen readers/keyboard users | Inline review comment |
-| 🟠 **IMPORTANT** | WCAG A/AA violations impacting usability | Inline review comment |
-| 🟡 **SUGGESTION** | Recommended improvements | Aggregated PR comment |
-| ⚪ **NIT** | Best practices | Aggregated PR comment |
+| 🟠 **IMPORTANT** | WCAG A/AA violations | Inline review comment |
+| 🟡 **SUGGESTION** | Recommended improvements | PR comment |
+| ⚪ **NIT** | Best practices | PR comment |
 
-## State Persistence
+## Comment Format
 
-The action uses GitHub Check Runs to persist state across runs:
+```markdown
+## ♿ Accessibility Review
 
-- **Issue Hashes**: Stored to avoid duplicate reports
-- **Analyzed Files**: Tracked to enable incremental analysis
-- **Last SHA**: Used to determine what to re-analyze
+Found **7 issues** (2 new since last analysis)
 
-State is stored in the Check Run's `output.text` field as JSON.
+### 🔴 Critical Issues
+- **src/Button.tsx:42** ⚡ **NEW** - Missing alt text on image
+  - WCAG 1.1.1 (Level A)
+  - **Fix:** alt='Product photo'
 
-## Deduplication
+### 🟠 Important Issues
+- **src/Form.tsx:15** - Missing label for email input
+  - WCAG 3.3.2 (Level A)
+  - **Fix:** aria-label='Email address'
 
-Issues are hashed using: `file:wcag_criterion:title`
+<details>
+<summary>📋 5 issues from previous analysis</summary>
+Files not re-analyzed in this run.
+</details>
 
-- Same issue on same file = won't re-report
-- File modified = re-analyzed, old issues removed, new issues added
-- Issue moved to different line = still recognized as same issue (line not in hash)
-
-## Setup
-
-### 1. Build and Commit
-
-```bash
-npm install
-npm run build
-git add .
-git commit -m "feat: Add incremental analysis and deduplication"
-git push
+---
+*🤖 This review was automatically generated.*
 ```
-
-### 2. Create Version Tag
-
-```bash
-git tag -a v5 -m "Add incremental analysis and deduplication"
-git push origin v5
-```
-
-### 3. Use in Your Workflow
-
-Add the workflow YAML to your repository's `.github/workflows/` directory.
 
 ## Development
 
@@ -165,15 +181,16 @@ src/
 ├── state/
 │   ├── index.ts       # State exports
 │   ├── types.ts       # Type definitions
-│   └── check-run.ts   # Check Run management
+│   └── check-run.ts   # Check Run state management
 ├── github/
 │   ├── index.ts       # GitHub exports
 │   ├── client.ts      # GitHub API client
-│   └── comments.ts    # Comment management
+│   └── comments.ts    # Comment formatting
 ├── llm/
-│   ├── index.ts
+│   ├── index.ts       # LLM exports
 │   ├── gemini-client.ts
-│   └── ollama-client.ts
+│   ├── ollama-client.ts
+│   └── batch.ts       # Batch processing
 ├── parsers/
 │   ├── index.ts
 │   └── diff-parser.ts

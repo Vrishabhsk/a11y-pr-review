@@ -1,7 +1,29 @@
+import * as core from '@actions/core';
 import * as github from '@actions/github';
-import { A11yIssue, FilePatch, ReviewCommentInfo } from '../state/types';
+import { A11yIssue, FilePatch, PRInfo, CommitInfo, ReviewCommentInfo } from '../state/types';
 
 type Octokit = ReturnType<typeof github.getOctokit>;
+
+export async function getPRInfo(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  prNumber: number
+): Promise<PRInfo> {
+  const { data: pr } = await octokit.rest.pulls.get({
+    owner,
+    repo,
+    pull_number: prNumber,
+  });
+
+  return {
+    number: pr.number,
+    draft: pr.draft || false,
+    headSha: pr.head.sha,
+    baseSha: pr.base.sha,
+    title: pr.title,
+  };
+}
 
 export async function getPRFiles(
   octokit: Octokit,
@@ -39,53 +61,95 @@ export async function getPRFiles(
   return files;
 }
 
-export async function getPRCommits(
+export async function getCommitsBetween(
   octokit: Octokit,
   owner: string,
   repo: string,
-  prNumber: number
-): Promise<Array<{ sha: string; message: string }>> {
-  const commits: Array<{ sha: string; message: string }> = [];
-  let page = 1;
-  const perPage = 100;
-
-  while (true) {
-    const { data } = await octokit.rest.pulls.listCommits({
+  baseSha: string,
+  headSha: string
+): Promise<CommitInfo[]> {
+  const commits: CommitInfo[] = [];
+  
+  try {
+    const { data: comparison } = await octokit.rest.repos.compareCommits({
       owner,
       repo,
-      pull_number: prNumber,
-      per_page: perPage,
-      page,
+      base: baseSha,
+      head: headSha,
     });
 
-    if (data.length === 0) break;
-
-    for (const commit of data) {
-      commits.push({
-        sha: commit.sha,
-        message: commit.commit.message,
-      });
+    if (comparison.commits) {
+      for (const commit of comparison.commits) {
+        commits.push({
+          sha: commit.sha,
+          message: commit.commit.message,
+        });
+      }
     }
-
-    if (data.length < perPage) break;
-    page++;
+  } catch (error) {
+    core.warning(`Failed to compare commits: ${error}`);
   }
 
   return commits;
 }
 
-export async function getPRHeadSha(
+export async function getFilesChangedBetween(
   octokit: Octokit,
   owner: string,
   repo: string,
-  prNumber: number
+  baseSha: string,
+  headSha: string
+): Promise<Set<string>> {
+  const changedFiles = new Set<string>();
+
+  try {
+    const { data: comparison } = await octokit.rest.repos.compareCommits({
+      owner,
+      repo,
+      base: baseSha,
+      head: headSha,
+    });
+
+    if (comparison.files) {
+      for (const file of comparison.files) {
+        if (file.status !== 'removed') {
+          changedFiles.add(file.filename);
+        }
+        if (file.previous_filename && file.status === 'renamed') {
+          changedFiles.add(file.previous_filename);
+        }
+      }
+    }
+  } catch (error) {
+    core.warning(`Failed to get changed files: ${error}`);
+  }
+
+  return changedFiles;
+}
+
+export async function getFileContent(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  path: string,
+  ref: string
 ): Promise<string> {
-  const { data: pr } = await octokit.rest.pulls.get({
-    owner,
-    repo,
-    pull_number: prNumber,
-  });
-  return pr.head.sha;
+  try {
+    const { data } = await octokit.rest.repos.getContent({
+      owner,
+      repo,
+      path,
+      ref,
+    });
+
+    if ('content' in data && data.type === 'file') {
+      return Buffer.from(data.content, 'base64').toString('utf-8');
+    }
+  } catch (error) {
+    core.warning(`Failed to get file content for ${path}: ${error}`);
+  }
+
+  return '';
 }
 
 export async function getReviewComments(
@@ -246,5 +310,3 @@ function formatInlineComment(issue: A11yIssue): string {
 
   return lines.join('\n');
 }
-
-import * as core from '@actions/core';

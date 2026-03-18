@@ -9,9 +9,10 @@ export interface A11yIssue {
     suggestion: string;
 }
 export interface CheckRunState {
-    lastAnalyzedSha: string;
-    analyzedFiles: string[];
-    issueHashes: string[];
+    version: number;
+    lastAnalyzedHeadSha: string;
+    prNumber: number;
+    issuesByFile: Record<string, A11yIssue[]>;
 }
 export interface PreviousRun {
     checkRunId: number;
@@ -22,11 +23,22 @@ export interface FilePatch {
     patch: string;
     status: 'added' | 'modified' | 'removed' | 'renamed';
 }
+export interface PRInfo {
+    number: number;
+    draft: boolean;
+    headSha: string;
+    baseSha: string;
+    title?: string;
+}
 export interface ReviewCommentInfo {
     id: number;
     path: string;
     line: number | null;
     body: string;
+}
+export interface CommitInfo {
+    sha: string;
+    message: string;
 }
 export declare function getCheckRunName(prNumber: number): string;
 export declare function hashIssue(issue: A11yIssue): string;
@@ -35,4 +47,8 @@ export declare function parseIssueHash(hash: string): {
     wcag_criterion: string;
     title: string;
 } | null;
+export declare function groupIssuesByFile(issues: A11yIssue[]): Record<string, A11yIssue[]>;
+export declare function flattenIssues(issuesByFile: Record<string, A11yIssue[]>): A11yIssue[];
+export declare const MAX_ISSUES = 100;
+export declare const BATCH_SIZE = 20;
 //# sourceMappingURL=types.d.ts.map

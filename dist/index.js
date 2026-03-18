@@ -31449,6 +31449,7 @@ async function run() {
         const apiKey = core.getInput('api-key');
         const model = core.getInput('model') || (llmBackend === 'gemini' ? 'gemini-2.0-flash' : 'qwen2.5-coder:32b');
         const ollamaUrl = core.getInput('ollama-url') || 'http://localhost:11434';
+        const failOnIssues = core.getInput('fail-on-issues').toLowerCase() !== 'false';
         if (llmBackend === 'gemini' && !apiKey) {
             core.setFailed('api-key is required for Gemini backend');
             return;
@@ -31546,6 +31547,24 @@ async function run() {
             await postComment(octokit, owner, repo, prNumber, formatNoIssuesComment(summary));
         }
         core.setOutput('issues-found', String(limitedIssues.length));
+        core.info(`Total issues found: ${limitedIssues.length}`);
+        if (failOnIssues && limitedIssues.length > 0) {
+            const criticalCount = limitedIssues.filter(i => i.severity === 'CRITICAL').length;
+            const importantCount = limitedIssues.filter(i => i.severity === 'IMPORTANT').length;
+            const suggestionCount = limitedIssues.filter(i => i.severity === 'SUGGESTION').length;
+            const nitCount = limitedIssues.filter(i => i.severity === 'NIT').length;
+            let message = `Accessibility issues found: ${limitedIssues.length} total`;
+            if (criticalCount > 0)
+                message += ` (${criticalCount} critical)`;
+            if (importantCount > 0)
+                message += ` (${importantCount} important)`;
+            if (suggestionCount > 0)
+                message += ` (${suggestionCount} suggestion)`;
+            if (nitCount > 0)
+                message += ` (${nitCount} nit)`;
+            core.setFailed(message);
+            return;
+        }
         core.info('Review complete!');
     }
     catch (error) {

@@ -26,6 +26,10 @@ inputs:
     description: 'Ollama API URL (if using ollama backend)'
     required: false
     default: 'http://localhost:11434'
+  fail-on-issues:
+    description: 'Fail the action if accessibility issues are found'
+    required: false
+    default: 'true'
 
 outputs:
   issues-found:

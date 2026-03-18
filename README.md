@@ -81,6 +81,7 @@ jobs:
 | `api-key` | API key (required for Gemini) | For Gemini | - |
 | `model` | Model to use | No | `gemini-2.0-flash` |
 | `ollama-url` | Ollama API URL | No | `http://localhost:11434` |
+| `fail-on-issues` | Fail action if issues found | No | `true` |
 
 ## Outputs
 

@@ -11,6 +11,7 @@ A GitHub Action that automatically reviews pull requests for accessibility (WCAG
   - SUGGESTION/NIT issues → Aggregated PR comment
 - **State Persistence**: Tracks reported issues across commits for deduplication
 - **Incremental Reviews**: Only analyzes new changes on subsequent commits
+- **TypeScript**: Native GitHub Action, fast execution, no runtime dependencies to install
 
 ## Usage
 
@@ -34,7 +35,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Accessibility Review
-        uses: your-org/a11y-pr-review-action@v1
+        uses: your-org/a11y-pr-review@v1
         with:
           llm-backend: 'gemini'
           gemini-api-key: ${{ secrets.GEMINI_API_KEY }}
@@ -52,11 +53,6 @@ jobs:
         image: ollama/ollama:latest
         ports:
           - 11434:11434
-        options: >-
-          --health-cmd "ollama list"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
 
     steps:
       - uses: actions/checkout@v4
@@ -65,7 +61,7 @@ jobs:
         run: ollama pull qwen2.5-coder:32b
 
       - name: Accessibility Review
-        uses: your-org/a11y-pr-review-action@v1
+        uses: your-org/a11y-pr-review@v1
         with:
           llm-backend: 'ollama'
           ollama-api-url: 'http://localhost:11434'
@@ -77,144 +73,31 @@ jobs:
 
 | Input | Description | Required | Default |
 |-------|-------------|----------|---------|
-| `llm-backend` | LLM backend to use (`gemini` or `ollama`) | Yes | `gemini` |
-| `gemini-api-key` | Google Gemini API key (required for Gemini) | No | - |
+| `llm-backend` | LLM backend (`gemini` or `ollama`) | Yes | `gemini` |
+| `gemini-api-key` | Google Gemini API key | For Gemini | - |
 | `gemini-model` | Gemini model to use | No | `gemini-2.0-flash` |
-| `ollama-api-url` | Ollama API URL (required for Ollama) | No | `http://localhost:11434` |
+| `ollama-api-url` | Ollama API URL | No | `http://localhost:11434` |
 | `ollama-model` | Ollama model to use | No | `qwen2.5-coder:32b` |
 | `github-token` | GitHub token for API access | Yes | - |
-| `severity-threshold` | Minimum severity to report (`CRITICAL`, `IMPORTANT`, `SUGGESTION`, `NIT`) | No | `SUGGESTION` |
-| `max-issues` | Maximum number of issues to report per review | No | `50` |
+| `severity-threshold` | Min severity to report | No | `SUGGESTION` |
+| `max-issues` | Max issues per review | No | `50` |
 
 ## Outputs
 
 | Output | Description |
 |--------|-------------|
-| `issues-found` | Total number of accessibility issues found |
-| `critical-count` | Number of critical issues found |
-| `important-count` | Number of important issues found |
+| `issues-found` | Total issues found |
+| `critical-count` | Critical issues |
+| `important-count` | Important issues |
 
 ## Severity Levels
 
-### CRITICAL
-Issues that block users with disabilities from accessing content:
-- Missing alt text on informative images
-- Keyboard traps
-- Unlabeled form inputs
-- Invalid ARIA roles/attributes
-
-### IMPORTANT
-WCAG Level A/AA violations that significantly impact usability:
-- Low color contrast
-- Missing focus indicators
-- Vague link text
-- Improper heading structure
-
-### SUGGESTION
-Recommended improvements for better accessibility:
-- Missing landmark regions
-- Missing page language
-- Non-semantic HTML
-
-### NIT
-Minor improvements and best practices:
-- Missing skip links
-- Non-optimal ARIA usage
-- Missing autocomplete attributes
-
-## State Persistence
-
-The action uses GitHub Artifacts to persist review state:
-- State is stored with 30-day retention
-- Tracks which commits have been reviewed
-- Records hashes of reported issues for deduplication
-- First PR → full review of accessibility-relevant files
-- Subsequent commits → only new changes
-
-## WCAG Coverage
-
-The action checks for violations of:
-
-### Perceivable
-- **1.1.1** Non-text Content (alt text)
-- **1.3.1** Info and Relationships (semantic HTML)
-- **1.4.3** Contrast (Minimum)
-- **1.4.11** Non-text Contrast
-
-### Operable
-- **2.1.1** Keyboard Accessible
-- **2.1.2** No Keyboard Trap
-- **2.4.4** Link Purpose
-- **2.4.7** Focus Visible
-
-### Understandable
-- **3.1.1** Language of Page
-- **3.3.1** Error Identification
-- **3.3.2** Labels or Instructions
-
-### Robust
-- **4.1.1** Parsing
-- **4.1.2** Name, Role, Value (ARIA)
-
-## Example Output
-
-### Inline Suggestion (CRITICAL)
-
-```markdown
-🔴 **Image missing alt text**
-
-**WCAG 1.1.1** (Level A)
-**Severity:** CRITICAL
-
-This informative image has no alt attribute, making it inaccessible to screen reader users.
-
-```suggestion
-<img src="chart.png" alt="Sales increased 25% in Q4 2024" />
-```
-```
-
-### Aggregated Comment (SUGGESTION/NIT)
-
-```markdown
-## ♿ Accessibility Suggestions
-
-### 📄 `src/components/Button.tsx`
-
-**🟡 Line 15: Missing button type**
-- WCAG 2.1.1 (Level AA)
-- Consider adding type="button" for clarity
-```
-
-## Customization
-
-### Custom Severity Threshold
-
-To only report CRITICAL and IMPORTANT issues:
-
-```yaml
-- name: Accessibility Review
-  uses: your-org/a11y-pr-review-action@v1
-  with:
-    severity-threshold: 'IMPORTANT'
-```
-
-### Different Models
-
-For larger diffs or more detailed analysis:
-
-```yaml
-# Gemini Pro
-- name: Accessibility Review
-  uses: your-org/a11y-pr-review-action@v1
-  with:
-    gemini-model: 'gemini-2.0-pro'
-
-# Ollama with different model
-- name: Accessibility Review
-  uses: your-org/a11y-pr-review-action@v1
-  with:
-    ollama-model: 'llama3.1:70b'
-```
+| Level | Description |
+|-------|-------------|
+| 🔴 **CRITICAL** | Blocks screen readers/keyboard users |
+| 🟠 **IMPORTANT** | WCAG A/AA violations impacting usability |
+| 🟡 **SUGGESTION** | Recommended improvements |
+| ⚪ **NIT** | Best practices |
 
 ## Development
 
@@ -223,28 +106,58 @@ For larger diffs or more detailed analysis:
 ```bash
 git clone https://github.com/your-org/a11y-pr-review-action.git
 cd a11y-pr-review-action
-pip install -r requirements.txt
+npm install
 ```
 
-### Testing Locally
+### Build
+
+```bash
+npm run build
+```
+
+### Test Locally
 
 ```bash
 # Set environment variables
-export LLM_BACKEND=gemini
-export GEMINI_API_KEY=your-api-key
-export GITHUB_TOKEN=your-token
+export INPUT_LLM_BACKEND=gemini
+export INPUT_GEMINI_API_KEY=your-api-key
+export INPUT_GITHUB_TOKEN=your-token
 export GITHUB_REPOSITORY=owner/repo
-export GITHUB_PR_NUMBER=123
-export GITHUB_SHA=abc123
+export GITHUB_EVENT_NAME=pull_request
 
 # Run
-python src/a11y_review.py
+node dist/index.js
+```
+
+## Project Structure
+
+```
+src/
+├── index.ts          # Main entry point
+├── types.ts          # TypeScript type definitions
+├── llm/
+│   ├── index.ts      # LLM client factory
+│   ├── base.ts       # Interface definition
+│   ├── gemini-client.ts
+│   └── ollama-client.ts
+├── github/
+│   ├── index.ts
+│   ├── client.ts     # GitHub API client
+│   ├── suggestions.ts # Inline suggestions
+│   └── comments.ts   # PR comments
+├── prompts/
+│   ├── index.ts
+│   ├── a11y-prompt.ts # WCAG prompts
+│   └── severity.ts    # Severity classification
+├── state/
+│   ├── index.ts
+│   ├── manager.ts     # State persistence
+│   └── deduplication.ts
+└── parsers/
+    ├── index.ts
+    └── diff-parser.ts
 ```
 
 ## License
 
-MIT License - See [LICENSE](LICENSE) for details.
-
-## Contributing
-
-Contributions welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+MIT

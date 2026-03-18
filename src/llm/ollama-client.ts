@@ -1,166 +1,86 @@
-/**
- * Ollama API client implementation
- */
+interface A11yIssue {
+  file: string;
+  line: number | null;
+  wcag_criterion: string;
+  wcag_level: string;
+  severity: 'CRITICAL' | 'IMPORTANT' | 'SUGGESTION' | 'NIT';
+  title: string;
+  description: string;
+  suggestion: string;
+}
 
-import { LLMClientInterface, LLMClientResponse } from './base';
-import { A11yIssue } from '../types';
+interface AnalysisResult {
+  issues: A11yIssue[];
+  summary: string;
+}
 
-export class OllamaClient implements LLMClientInterface {
+export class OllamaClient {
   private apiUrl: string;
   private model: string;
-  private timeout: number = 300000; // 5 minutes
 
   constructor(apiUrl: string = 'http://localhost:11434', model: string = 'qwen2.5-coder:32b') {
     this.apiUrl = apiUrl.replace(/\/$/, '');
     this.model = model;
   }
 
-  get modelName(): string {
-    return this.model;
-  }
+  async analyze(diffContent: string, prompt: string): Promise<AnalysisResult> {
+    const fullPrompt = `${prompt}\n\n---\n\n## Code Diff:\n\n${diffContent}\n\nRespond with valid JSON only.`;
 
-  get backendType(): string {
-    return 'ollama';
-  }
-
-  private async request(endpoint: string, data: Record<string, unknown>): Promise<Record<string, unknown>> {
-    const response = await fetch(`${this.apiUrl}/api/${endpoint}`, {
+    const response = await fetch(`${this.apiUrl}/api/generate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(data),
-      signal: AbortSignal.timeout(this.timeout),
+      body: JSON.stringify({
+        model: this.model,
+        prompt: fullPrompt,
+        stream: false,
+        format: 'json',
+        options: {
+          temperature: 0.1,
+          num_ctx: 32768,
+        },
+      }),
     });
 
     if (!response.ok) {
-      throw new Error(`Ollama API error: ${response.status} ${response.statusText}`);
+      const text = await response.text();
+      throw new Error(`Ollama API error (${response.status}): ${text}`);
     }
 
-    return response.json() as Promise<Record<string, unknown>>;
-  }
-
-  private async ensureModelAvailable(): Promise<void> {
-    try {
-      const response = await fetch(`${this.apiUrl}/api/tags`);
-      const data = await response.json() as { models?: Array<{ name: string }> };
-      const models = data.models || [];
-      const modelNames = models.map(m => m.name.split(':')[0]);
-
-      if (!modelNames.includes(this.model.split(':')[0])) {
-        console.log(`Model ${this.model} not found, pulling...`);
-        await this.pullModel();
-      }
-    } catch (error) {
-      throw new Error(`Failed to check/pull model: ${error}`);
+    const data = await response.json() as { response?: string; error?: string };
+    
+    if (data.error) {
+      throw new Error(`Ollama error: ${data.error}`);
     }
-  }
 
-  private async pullModel(): Promise<void> {
-    await fetch(`${this.apiUrl}/api/pull`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: this.model, stream: false }),
-      signal: AbortSignal.timeout(600000), // 10 minutes for pull
-    });
-  }
-
-  async analyzeDiff(
-    diffContent: string,
-    systemPrompt: string,
-    userPrompt: string,
-    _jsonSchema?: object
-  ): Promise<LLMClientResponse> {
-    await this.ensureModelAvailable();
-
-    const fullPrompt = `${systemPrompt}\n\n${userPrompt}\n\n## Diff to Analyze:\n\n${diffContent}\n\nIMPORTANT: Respond with valid JSON only. No markdown formatting.`;
-
-    const requestData = {
-      model: this.model,
-      prompt: fullPrompt,
-      stream: false,
-      format: 'json',
-      options: {
-        temperature: 0.1,
-        top_p: 0.95,
-        num_ctx: 32768,
-      },
-    };
-
+    const content = data.response || '';
+    
     try {
-      const result = await this.request('generate', requestData);
-      const content = String(result.response || '');
-
-      // Parse the JSON response
-      let issues: A11yIssue[] = [];
-      let summary: string | undefined;
-
-      try {
-        const parsed = JSON.parse(this.extractJson(content));
-        if (Array.isArray(parsed.issues)) {
-          issues = parsed.issues.map((issue: Record<string, unknown>) => ({
-            file: String(issue.file),
-            line: Number(issue.line),
-            wcag_criterion: String(issue.wcag_criterion),
-            wcag_level: (issue.wcag_level as 'A' | 'AA' | 'AAA') || 'A',
-            severity: issue.severity as A11yIssue['severity'],
-            title: String(issue.title),
-            description: String(issue.description),
-            suggestion: String(issue.suggestion),
-            element: issue.element ? String(issue.element) : undefined,
-          }));
-        }
-        summary = parsed.summary;
-      } catch (parseError) {
-        console.warn('Failed to parse Ollama response:', parseError);
+      let parsed: Record<string, unknown>;
+      
+      const jsonMatch = content.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        parsed = JSON.parse(jsonMatch[0]);
+      } else {
+        parsed = JSON.parse(content);
       }
 
-      const usage = {
-        promptTokens: Number(result.prompt_eval_count || 0),
-        completionTokens: Number(result.eval_count || 0),
-        totalTokens: Number(result.prompt_eval_count || 0) + Number(result.eval_count || 0),
-      };
+      const issues: A11yIssue[] = (parsed.issues as Array<Record<string, unknown>> || []).map((issue) => ({
+        file: String(issue.file || ''),
+        line: issue.line ? Number(issue.line) : null,
+        wcag_criterion: String(issue.wcag_criterion || ''),
+        wcag_level: String(issue.wcag_level || 'A'),
+        severity: (issue.severity as A11yIssue['severity']) || 'SUGGESTION',
+        title: String(issue.title || ''),
+        description: String(issue.description || ''),
+        suggestion: String(issue.suggestion || ''),
+      }));
 
       return {
-        content,
-        model: this.model,
         issues,
-        summary,
-        usage,
+        summary: String(parsed.summary || 'Accessibility review completed.'),
       };
-    } catch (error) {
-      throw new Error(`Ollama generation error: ${error instanceof Error ? error.message : String(error)}`);
+    } catch (parseError) {
+      throw new Error(`Failed to parse Ollama response: ${parseError instanceof Error ? parseError.message : String(parseError)}`);
     }
-  }
-
-  private extractJson(content: string): string {
-    // Try to find JSON array or object
-    const arrayMatch = content.match(/\[[\s\S]*?\]/);
-    if (arrayMatch) {
-      // Wrap in object if it's just an array
-      return `{"issues": ${arrayMatch[0]}}`;
-    }
-
-    const objectMatch = content.match(/\{[\s\S]*?\}/);
-    if (objectMatch) {
-      return objectMatch[0];
-    }
-
-    return content;
-  }
-
-  async healthCheck(): Promise<boolean> {
-    try {
-      const response = await fetch(`${this.apiUrl}/api/tags`);
-      return response.ok;
-    } catch {
-      return false;
-    }
-  }
-
-  getModelInfo(): { backend: string; model: string; apiUrl: string } {
-    return {
-      backend: 'ollama',
-      model: this.model,
-      apiUrl: this.apiUrl,
-    };
   }
 }

@@ -1,237 +1,249 @@
-/**
- * A11y PR Review Action - Main Entry Point
- *
- * This action analyzes pull requests for accessibility issues using LLM analysis.
- */
-
 import * as core from '@actions/core';
 import * as github from '@actions/github';
-import { GitHubClient } from './github';
-import { createLLMClient } from './llm';
-import { SYSTEM_PROMPT, buildUserPrompt } from './prompts/a11y-prompt';
-import { Severity, severityMeetsThreshold } from './prompts/severity';
-import { StateManager } from './state';
-import { DiffParser } from './parsers';
-import { InlineSuggestionManager } from './github/suggestions';
-import { CommentManager } from './github/comments';
-import { A11yIssue } from './types';
+import { GeminiClient } from './llm/gemini-client';
+import { OllamaClient } from './llm/ollama-client';
+import { buildPrompt } from './prompts';
+import { isAccessibilityRelevant, formatDiffForAnalysis } from './parsers/diff-parser';
+
+interface A11yIssue {
+  file: string;
+  line: number | null;
+  wcag_criterion: string;
+  wcag_level: string;
+  severity: 'CRITICAL' | 'IMPORTANT' | 'SUGGESTION' | 'NIT';
+  title: string;
+  description: string;
+  suggestion: string;
+}
+
+interface AnalysisResult {
+  issues: A11yIssue[];
+  summary: string;
+}
 
 async function run(): Promise<void> {
   try {
-    // Get inputs
-    const llmBackend = core.getInput('llm-backend', { required: true });
-    const githubToken = core.getInput('github-token', { required: true });
-    const severityThreshold = core.getInput('severity-threshold') || 'SUGGESTION';
-    const maxIssues = parseInt(core.getInput('max-issues') || '50', 10);
-    const stateDir = process.env.STATE_DIR || '/tmp/a11y-state';
+    core.info('Starting accessibility review...');
 
-    // LLM-specific inputs
-    const llmOptions: {
-      apiKey?: string;
-      model?: string;
-      apiUrl?: string;
-    } = {};
+    const token = core.getInput('github-token', { required: true });
+    const llmBackend = core.getInput('llm-backend', { required: true }).toLowerCase();
+    const apiKey = core.getInput('api-key');
+    const model = core.getInput('model') || (llmBackend === 'gemini' ? 'gemini-2.0-flash' : 'qwen2.5-coder:32b');
+    const ollamaUrl = core.getInput('ollama-url') || 'http://localhost:11434';
 
-    if (llmBackend === 'gemini') {
-      llmOptions.apiKey = core.getInput('gemini-api-key', { required: true });
-      llmOptions.model = core.getInput('gemini-model') || 'gemini-2.0-flash';
-    } else if (llmBackend === 'ollama') {
-      llmOptions.apiUrl = core.getInput('ollama-api-url') || 'http://localhost:11434';
-      llmOptions.model = core.getInput('ollama-model') || 'qwen2.5-coder:32b';
+    if (llmBackend === 'gemini' && !apiKey) {
+      core.setFailed('api-key is required for Gemini backend');
+      return;
     }
 
-    // Get GitHub context
     const context = github.context;
-    const repository = `${context.repo.owner}/${context.repo.repo}`;
-
-    if (context.eventName !== 'pull_request') {
+    if (context.eventName !== 'pull_request' && context.eventName !== 'pull_request_target') {
       core.setFailed('This action only works on pull_request events');
       return;
     }
 
     const prNumber = context.payload.pull_request?.number;
-    const commitSha = context.sha;
+    const owner = context.repo.owner;
+    const repo = context.repo.repo;
 
     if (!prNumber) {
       core.setFailed('Could not determine PR number');
       return;
     }
 
-    core.info(`Starting accessibility review for ${repository}#${prNumber}`);
-    core.info(`LLM Backend: ${llmBackend}`);
+    core.info(`Reviewing PR #${prNumber} in ${owner}/${repo}`);
 
-    // Initialize components
-    const githubClient = new GitHubClient(githubToken, repository);
-    const stateManager = new StateManager(stateDir);
-    const llmClient = createLLMClient(llmBackend, llmOptions);
-    const diffParser = new DiffParser();
-    const suggestionManager = new InlineSuggestionManager(githubClient);
-    const commentManager = new CommentManager(githubClient);
+    const octokit = github.getOctokit(token);
 
-    // Load previous state
-    const state = stateManager.load(prNumber, repository);
-    core.info(`Loaded state: ${state.review_count} previous reviews`);
+    core.info('Fetching PR files...');
+    const { data: files } = await octokit.rest.pulls.listFiles({
+      owner,
+      repo,
+      pull_number: prNumber,
+      per_page: 300,
+    });
 
-    // Get PR files
-    const prFiles = await githubClient.getPRFiles(prNumber);
-    core.info(`Found ${prFiles.length} changed files in PR`);
-
-    // Parse diffs
-    const fileDiffs: ReturnType<typeof DiffParser.parse>['files'] = [];
-    for (const file of prFiles) {
-      if (file.patch) {
-        const parsed = DiffParser.parse(file.patch);
-        fileDiffs.push(...parsed.files);
-      }
-    }
-
-    // Filter to accessibility-relevant files
-    const relevantFiles = DiffParser.filterAccessibilityFiles(fileDiffs);
-    core.info(`Found ${relevantFiles.length} accessibility-relevant files`);
-
-    if (relevantFiles.length === 0) {
-      core.info('No accessibility-relevant changes found');
-
-      // Create "no issues" comment
-      await commentManager.createSummaryComment(prNumber, 0, 0, 0, 0, 0);
-
-      // Set outputs
+    if (!files || files.length === 0) {
+      core.info('No files changed in this PR');
+      await postComment(octokit, owner, repo, prNumber, '✅ No files changed in this PR.');
       core.setOutput('issues-found', '0');
-      core.setOutput('critical-count', '0');
-      core.setOutput('important-count', '0');
-
       return;
     }
 
-    // Build diff content for analysis
-    const diffContent = DiffParser.buildCodeForAnalysis(relevantFiles, true);
+    const relevantFiles = files.filter(f => f.patch && isAccessibilityRelevant(f.filename));
 
-    // Detect framework
-    const framework = detectFramework(prFiles);
-
-    // Build prompts
-    const userPrompt = buildUserPrompt(repository, prNumber, relevantFiles.length, framework);
-
-    // Send to LLM
-    core.info(`Analyzing with ${llmBackend}...`);
-    const response = await llmClient.analyzeDiff(diffContent, SYSTEM_PROMPT, userPrompt);
-
-    core.info(`LLM response received (${response.issues.length} issues found)`);
-
-    // Filter by severity threshold
-    const filteredIssues = response.issues.filter(issue =>
-      severityMeetsThreshold(issue.severity as Severity, severityThreshold)
-    );
-    core.info(`${filteredIssues.length} issues meet severity threshold (${severityThreshold})`);
-
-    // Deduplicate against previous state
-    const existingHashes = new Set([
-      ...stateManager.getExistingHashes(true),
-      ...stateManager.getExistingHashes(false),
-    ]);
-
-    const { uniqueIssues, duplicateIssues } = stateManager
-      ? (() => {
-          const seen = new Set<string>();
-          const unique: A11yIssue[] = [];
-          const duplicate: A11yIssue[] = [];
-
-          for (const issue of filteredIssues) {
-            const hash = `${issue.file}:${issue.line}:${issue.wcag_criterion}:${issue.title}`;
-            if (seen.has(hash) || existingHashes.has(hash)) {
-              duplicate.push(issue);
-            } else {
-              seen.add(hash);
-              unique.push(issue);
-            }
-          }
-
-          return { uniqueIssues: unique, duplicateIssues: duplicate };
-        })()
-      : { uniqueIssues: filteredIssues, duplicateIssues: [] };
-
-    core.info(`${uniqueIssues.length} new issues, ${duplicateIssues.length} duplicates`);
-
-    // Limit issues
-    const issuesToReport = uniqueIssues.slice(0, maxIssues);
-
-    // Categorize issues
-    const inlineIssues = issuesToReport.filter(
-      i => i.severity === Severity.CRITICAL || i.severity === Severity.IMPORTANT
-    );
-    const commentIssues = issuesToReport.filter(
-      i => i.severity === Severity.SUGGESTION || i.severity === Severity.NIT
-    );
-
-    core.info(`Submitting ${inlineIssues.length} inline suggestions, ${commentIssues.length} comment issues`);
-
-    // Submit inline suggestions
-    if (inlineIssues.length > 0) {
-      await suggestionManager.createReviewWithSuggestions(prNumber, inlineIssues, commitSha);
-      for (const issue of inlineIssues) {
-        stateManager.addIssue(issue, commitSha, true);
-      }
+    if (relevantFiles.length === 0) {
+      core.info('No accessibility-relevant files found');
+      await postComment(octokit, owner, repo, prNumber, '✅ No accessibility-relevant changes found in this PR.');
+      core.setOutput('issues-found', '0');
+      return;
     }
 
-    // Post aggregated comment
-    if (commentIssues.length > 0) {
-      await commentManager.postOrUpdateComment(prNumber, commentIssues, response.summary);
-      for (const issue of commentIssues) {
-        stateManager.addIssue(issue, commitSha, false);
-      }
+    core.info(`Found ${relevantFiles.length} accessibility-relevant files`);
+
+    const diffContent = formatDiffForAnalysis(relevantFiles);
+
+    if (!diffContent.trim()) {
+      core.info('No relevant code changes found');
+      core.setOutput('issues-found', '0');
+      return;
     }
 
-    // Create summary comment
-    const criticalCount = issuesToReport.filter(i => i.severity === Severity.CRITICAL).length;
-    const importantCount = issuesToReport.filter(i => i.severity === Severity.IMPORTANT).length;
-    const suggestionCount = issuesToReport.filter(i => i.severity === Severity.SUGGESTION).length;
-    const nitCount = issuesToReport.filter(i => i.severity === Severity.NIT).length;
+    const prompt = buildPrompt(owner, repo, prNumber);
 
-    await commentManager.createSummaryComment(
-      prNumber,
-      issuesToReport.length,
-      criticalCount,
-      importantCount,
-      suggestionCount,
-      nitCount,
-      response.summary
-    );
+    core.info(`Analyzing with ${llmBackend} (${model})...`);
 
-    // Update state
-    stateManager.addReviewedCommit(commitSha);
-    stateManager.setLastReviewSha(commitSha);
-    stateManager.incrementReviewCount();
-    stateManager.save();
+    let result: AnalysisResult;
 
-    // Set outputs
-    core.setOutput('issues-found', String(issuesToReport.length));
-    core.setOutput('critical-count', String(criticalCount));
-    core.setOutput('important-count', String(importantCount));
+    if (llmBackend === 'gemini') {
+      const client = new GeminiClient(apiKey, model);
+      result = await client.analyze(diffContent, prompt);
+    } else {
+      const client = new OllamaClient(ollamaUrl, model);
+      result = await client.analyze(diffContent, prompt);
+    }
 
+    const issues = result.issues;
+    const summary = result.summary;
+
+    core.info(`Found ${issues.length} accessibility issues`);
+
+    const maxIssues = 50;
+    const limitedIssues = issues.slice(0, maxIssues);
+
+    if (limitedIssues.length > 0) {
+      const comment = formatReviewComment(limitedIssues, summary);
+      await postComment(octokit, owner, repo, prNumber, comment);
+    } else {
+      const comment = formatNoIssuesComment();
+      await postComment(octokit, owner, repo, prNumber, comment);
+    }
+
+    core.setOutput('issues-found', String(limitedIssues.length));
     core.info('Review complete!');
+
   } catch (error) {
-    core.setFailed(`Action failed: ${error instanceof Error ? error.message : String(error)}`);
-    if (error instanceof Error && error.stack) {
-      core.debug(error.stack);
-    }
+    const message = error instanceof Error ? error.message : String(error);
+    core.setFailed(`Action failed: ${message}`);
+    core.debug(`Stack trace: ${error instanceof Error ? error.stack : 'N/A'}`);
   }
 }
 
-function detectFramework(prFiles: { path: string }[]): string {
-  const extensions: Record<string, number> = {};
+async function postComment(
+  octokit: ReturnType<typeof github.getOctokit>,
+  owner: string,
+  repo: string,
+  prNumber: number,
+  body: string
+): Promise<void> {
+  const { data: comments } = await octokit.rest.issues.listComments({
+    owner,
+    repo,
+    issue_number: prNumber,
+  });
 
-  for (const file of prFiles) {
-    const ext = file.path.split('.').pop()?.toLowerCase() || '';
-    extensions[ext] = (extensions[ext] || 0) + 1;
+  const botComment = comments.find(c =>
+    c.user?.type === 'Bot' &&
+    c.body?.includes('<!-- a11y-review -->')
+  );
+
+  if (botComment) {
+    await octokit.rest.issues.updateComment({
+      owner,
+      repo,
+      comment_id: botComment.id,
+      body,
+    });
+  } else {
+    await octokit.rest.issues.createComment({
+      owner,
+      repo,
+      issue_number: prNumber,
+      body,
+    });
+  }
+}
+
+function formatReviewComment(issues: A11yIssue[], summary?: string): string {
+  const sections: string[] = [
+    '<!-- a11y-review -->',
+    '## ♿ Accessibility Review',
+    '',
+    summary ? `> ${summary}` : '> Automated WCAG 2.1/2.2 accessibility analysis',
+    '',
+  ];
+
+  const critical = issues.filter(i => i.severity === 'CRITICAL');
+  const important = issues.filter(i => i.severity === 'IMPORTANT');
+  const suggestion = issues.filter(i => i.severity === 'SUGGESTION');
+  const nit = issues.filter(i => i.severity === 'NIT');
+
+  if (critical.length > 0) {
+    sections.push('### 🔴 Critical Issues');
+    sections.push('');
+    for (const issue of critical) {
+      sections.push(formatIssue(issue));
+    }
   }
 
-  if (extensions['tsx'] || extensions['jsx']) return 'React';
-  if (extensions['vue']) return 'Vue';
-  if (extensions['svelte']) return 'Svelte';
-  if (extensions['html'] || extensions['htm']) return 'HTML';
-  if (extensions['php']) return 'PHP';
+  if (important.length > 0) {
+    sections.push('### 🟠 Important Issues');
+    sections.push('');
+    for (const issue of important) {
+      sections.push(formatIssue(issue));
+    }
+  }
 
-  return 'Unknown';
+  if (suggestion.length > 0) {
+    sections.push('### 🟡 Suggestions');
+    sections.push('');
+    for (const issue of suggestion) {
+      sections.push(formatIssue(issue));
+    }
+  }
+
+  if (nit.length > 0) {
+    sections.push('### ⚪ Minor Issues');
+    sections.push('');
+    for (const issue of nit) {
+      sections.push(formatIssue(issue));
+    }
+  }
+
+  sections.push('');
+  sections.push('---');
+  sections.push('*🤖 This review was automatically generated. Please verify all suggestions.*');
+
+  return sections.join('\n');
+}
+
+function formatIssue(issue: A11yIssue): string {
+  const lines: string[] = [
+    `**${issue.file}${issue.line ? `:${issue.line}` : ''}**`,
+    `- **WCAG ${issue.wcag_criterion}** (Level ${issue.wcag_level})`,
+    `- ${issue.description}`,
+  ];
+
+  if (issue.suggestion) {
+    lines.push(`- **Fix**: ${issue.suggestion}`);
+  }
+
+  lines.push('');
+  return lines.join('\n');
+}
+
+function formatNoIssuesComment(): string {
+  return [
+    '<!-- a11y-review -->',
+    '## ✅ Accessibility Review',
+    '',
+    'No accessibility issues were found in this PR.',
+    '',
+    'The changes appear to follow WCAG 2.1/2.2 guidelines.',
+    '',
+    '---',
+    '*🤖 This review was automatically generated.*',
+  ].join('\n');
 }
 
 run();

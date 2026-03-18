@@ -1,5 +1,5 @@
 name: 'A11y PR Review'
-description: 'Automated accessibility (WCAG) review for pull requests using LLM analysis'
+description: 'Automated accessibility (WCAG) review for pull requests'
 author: 'Accessibility Team'
 
 branding:
@@ -7,44 +7,29 @@ branding:
   color: 'blue'
 
 inputs:
-  llm-backend:
-    description: 'LLM backend to use (gemini or ollama)'
-    required: true
-    default: 'gemini'
-  gemini-api-key:
-    description: 'Gemini API key (required when llm-backend is gemini)'
-    required: false
-  gemini-model:
-    description: 'Gemini model to use'
-    required: false
-    default: 'gemini-2.0-flash'
-  ollama-api-url:
-    description: 'Ollama API URL (required when llm-backend is ollama)'
-    required: false
-    default: 'http://localhost:11434'
-  ollama-model:
-    description: 'Ollama model to use'
-    required: false
-    default: 'qwen2.5-coder:32b'
   github-token:
     description: 'GitHub token for API access'
     required: true
-  severity-threshold:
-    description: 'Minimum severity level to report (CRITICAL, IMPORTANT, SUGGESTION, NIT)'
+    default: ${{ github.token }}
+  llm-backend:
+    description: 'LLM backend (gemini or ollama)'
+    required: true
+    default: 'gemini'
+  api-key:
+    description: 'API key (Gemini API key or Ollama auth)'
     required: false
-    default: 'SUGGESTION'
-  max-issues:
-    description: 'Maximum number of issues to report per review'
+  model:
+    description: 'Model to use'
     required: false
-    default: '50'
+    default: 'gemini-2.0-flash'
+  ollama-url:
+    description: 'Ollama API URL (if using ollama backend)'
+    required: false
+    default: 'http://localhost:11434'
 
 outputs:
   issues-found:
-    description: 'Total number of accessibility issues found'
-  critical-count:
-    description: 'Number of critical issues found'
-  important-count:
-    description: 'Number of important issues found'
+    description: 'Number of accessibility issues found'
 
 runs:
   using: 'node20'

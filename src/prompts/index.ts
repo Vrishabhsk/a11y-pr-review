@@ -1,2 +1,1 @@
-export * from './severity';
-export * from './a11y-prompt';
+export { buildPrompt, getSystemPrompt } from './a11y-prompt';

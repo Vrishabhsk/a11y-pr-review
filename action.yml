@@ -1,0 +1,99 @@
+name: 'A11y PR Review'
+description: 'Automated accessibility (WCAG) review for pull requests using LLM analysis'
+author: 'Accessibility Team'
+
+branding:
+  icon: 'eye'
+  color: 'blue'
+
+inputs:
+  llm-backend:
+    description: 'LLM backend to use (gemini or ollama)'
+    required: true
+    default: 'gemini'
+  gemini-api-key:
+    description: 'Gemini API key (required when llm-backend is gemini)'
+    required: false
+  gemini-model:
+    description: 'Gemini model to use'
+    required: false
+    default: 'gemini-2.0-flash'
+  ollama-api-url:
+    description: 'Ollama API URL (required when llm-backend is ollama)'
+    required: false
+    default: 'http://localhost:11434'
+  ollama-model:
+    description: 'Ollama model to use'
+    required: false
+    default: 'qwen2.5-coder:32b'
+  github-token:
+    description: 'GitHub token for API access'
+    required: true
+  severity-threshold:
+    description: 'Minimum severity level to report (CRITICAL, IMPORTANT, SUGGESTION, NIT)'
+    required: false
+    default: 'SUGGESTION'
+  max-issues:
+    description: 'Maximum number of issues to report per review'
+    required: false
+    default: '50'
+
+outputs:
+  issues-found:
+    description: 'Total number of accessibility issues found'
+  critical-count:
+    description: 'Number of critical issues found'
+  important-count:
+    description: 'Number of important issues found'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup Python 3.11
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Install dependencies
+      shell: bash
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r ${{ github.action_path }}/requirements.txt
+
+    - name: Download previous state artifact
+      shell: bash
+      run: |
+        # Try to download previous state artifact for deduplication
+        ARTIFACT_NAME="a11y-review-state-pr-${{ github.event.pull_request.number }}"
+        gh run download --name "$ARTIFACT_NAME" --dir /tmp/a11y-state 2>/dev/null || echo "No previous state found"
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+
+    - name: Run accessibility review
+      shell: bash
+      id: review
+      run: |
+        python ${{ github.action_path }}/src/a11y_review.py
+      env:
+        LLM_BACKEND: ${{ inputs.llm-backend }}
+        GEMINI_API_KEY: ${{ inputs.gemini-api-key }}
+        GEMINI_MODEL: ${{ inputs.gemini-model }}
+        OLLAMA_API_URL: ${{ inputs.ollama-api-url }}
+        OLLAMA_MODEL: ${{ inputs.ollama-model }}
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        SEVERITY_THRESHOLD: ${{ inputs.severity-threshold }}
+        MAX_ISSUES: ${{ inputs.max-issues }}
+        GITHUB_REPOSITORY: ${{ github.repository }}
+        GITHUB_PR_NUMBER: ${{ github.event.pull_request.number }}
+        GITHUB_SHA: ${{ github.sha }}
+        GITHUB_EVENT_NAME: ${{ github.event_name }}
+        STATE_DIR: '/tmp/a11y-state'
+        ACTION_PATH: ${{ github.action_path }}
+
+    - name: Upload state artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: a11y-review-state-pr-${{ github.event.pull_request.number }}
+        path: /tmp/a11y-state/review_state.json
+        retention-days: 30
+        overwrite: true

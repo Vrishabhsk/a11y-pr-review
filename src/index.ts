@@ -341,19 +341,20 @@ async function postResults(
     }
   }
 
-  // PR comment: Only SUGGESTION/NIT issues (CRITICAL/IMPORTANT are in inline review)
-  const suggestionsAndNits = allIssues.filter(
-    i => i.severity === 'SUGGESTION' || i.severity === 'NIT'
-  );
-  const newSuggestionsAndNits = newIssues.filter(
-    i => i.severity === 'SUGGESTION' || i.severity === 'NIT'
-  );
-
-  if (suggestionsAndNits.length > 0) {
-    core.info(`Posting PR comment with ${suggestionsAndNits.length} suggestions/nits`);
-    const comment = formatIssueComment(suggestionsAndNits, newSuggestionsAndNits);
+  // PR comment: ALL issues (complete summary)
+  if (allIssues.length > 0) {
+    const criticalAndImportantCount = allIssues.filter(
+      i => i.severity === 'CRITICAL' || i.severity === 'IMPORTANT'
+    ).length;
+    
+    let summaryText: string | undefined;
+    if (criticalAndImportantCount > 0) {
+      summaryText = `${criticalAndImportantCount} issue${criticalAndImportantCount === 1 ? '' : 's'} have inline suggestions in the Files Changed tab.`;
+    }
+    
+    const comment = formatIssueComment(allIssues, newIssues, summaryText);
     await createOrUpdateComment(octokit, owner, repo, prNumber, comment);
-  } else if (allIssues.length === 0) {
+  } else {
     await createOrUpdateComment(octokit, owner, repo, prNumber, formatNoIssuesComment());
   }
 

@@ -31652,24 +31652,36 @@ async function createOrUpdateComment(octokit, owner, repo, prNumber, body) {
         return newComment.id;
     }
 }
-function formatIssueComment(issues, newIssues, summary) {
+function formatIssueComment(allIssues, newIssues, summary) {
     const sections = [];
-    const total = Math.min(issues.length, types_1.MAX_ISSUES);
+    const total = Math.min(allIssues.length, types_1.MAX_ISSUES);
     const newCount = newIssues.length;
-    sections.push('## ♿ Accessibility Suggestions', '');
+    sections.push('## ♿ Accessibility Review', '');
     if (summary) {
         sections.push(`> ${summary}`, '');
     }
-    if (newCount > 0) {
-        sections.push(`**Found ${total} suggestion${total === 1 ? '' : 's'} (${newCount} new since last analysis):**`, '');
-    }
-    else {
-        sections.push(`**Found ${total} suggestion${total === 1 ? '' : 's'}:**`, '');
-    }
+    const newLabel = newCount > 0 ? ` (${newCount} new since last analysis)` : '';
+    sections.push(`**Found ${total} issue${total === 1 ? '' : 's'}${newLabel}:**`, '');
     // Apply MAX_ISSUES limit first, then filter by severity
-    const limitedIssues = issues.slice(0, types_1.MAX_ISSUES);
+    const limitedIssues = allIssues.slice(0, types_1.MAX_ISSUES);
+    const critical = limitedIssues.filter(i => i.severity === 'CRITICAL');
+    const important = limitedIssues.filter(i => i.severity === 'IMPORTANT');
     const suggestions = limitedIssues.filter(i => i.severity === 'SUGGESTION');
     const nits = limitedIssues.filter(i => i.severity === 'NIT');
+    if (critical.length > 0) {
+        sections.push('### 🔴 Critical Issues', '');
+        for (const issue of critical) {
+            const isNew = newIssues.includes(issue);
+            sections.push(formatIssueItem(issue, isNew));
+        }
+    }
+    if (important.length > 0) {
+        sections.push('### 🟠 Important Issues', '');
+        for (const issue of important) {
+            const isNew = newIssues.includes(issue);
+            sections.push(formatIssueItem(issue, isNew));
+        }
+    }
     if (suggestions.length > 0) {
         sections.push('### 🟡 Suggestions', '');
         for (const issue of suggestions) {
@@ -31683,9 +31695,6 @@ function formatIssueComment(issues, newIssues, summary) {
             const isNew = newIssues.includes(issue);
             sections.push(formatIssueItem(issue, isNew));
         }
-    }
-    if (suggestions.length === 0 && nits.length === 0) {
-        sections.push('No suggestions at this time.');
     }
     sections.push('');
     sections.push('---');
@@ -31974,15 +31983,17 @@ async function postResults(octokit, owner, repo, prNumber, headSha, allIssues, n
             core.warning(`Failed to create inline review: ${error}`);
         }
     }
-    // PR comment: Only SUGGESTION/NIT issues (CRITICAL/IMPORTANT are in inline review)
-    const suggestionsAndNits = allIssues.filter(i => i.severity === 'SUGGESTION' || i.severity === 'NIT');
-    const newSuggestionsAndNits = newIssues.filter(i => i.severity === 'SUGGESTION' || i.severity === 'NIT');
-    if (suggestionsAndNits.length > 0) {
-        core.info(`Posting PR comment with ${suggestionsAndNits.length} suggestions/nits`);
-        const comment = (0, comments_1.formatIssueComment)(suggestionsAndNits, newSuggestionsAndNits);
+    // PR comment: ALL issues (complete summary)
+    if (allIssues.length > 0) {
+        const criticalAndImportantCount = allIssues.filter(i => i.severity === 'CRITICAL' || i.severity === 'IMPORTANT').length;
+        let summaryText;
+        if (criticalAndImportantCount > 0) {
+            summaryText = `${criticalAndImportantCount} issue${criticalAndImportantCount === 1 ? '' : 's'} have inline suggestions in the Files Changed tab.`;
+        }
+        const comment = (0, comments_1.formatIssueComment)(allIssues, newIssues, summaryText);
         await (0, comments_1.createOrUpdateComment)(octokit, owner, repo, prNumber, comment);
     }
-    else if (allIssues.length === 0) {
+    else {
         await (0, comments_1.createOrUpdateComment)(octokit, owner, repo, prNumber, (0, comments_1.formatNoIssuesComment)());
     }
     await (0, check_run_1.finalizeCheckRun)(octokit, owner, repo, checkRunId, state, newIssues.length);

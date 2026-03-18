@@ -46,32 +46,47 @@ export async function createOrUpdateComment(
 }
 
 export function formatIssueComment(
-  issues: A11yIssue[],
+  allIssues: A11yIssue[],
   newIssues: A11yIssue[],
   summary?: string
 ): string {
   const sections: string[] = [];
 
-  const total = Math.min(issues.length, MAX_ISSUES);
+  const total = Math.min(allIssues.length, MAX_ISSUES);
   const newCount = newIssues.length;
 
-  sections.push('## ♿ Accessibility Suggestions', '');
+  sections.push('## ♿ Accessibility Review', '');
 
   if (summary) {
     sections.push(`> ${summary}`, '');
   }
 
-  if (newCount > 0) {
-    sections.push(`**Found ${total} suggestion${total === 1 ? '' : 's'} (${newCount} new since last analysis):**`, '');
-  } else {
-    sections.push(`**Found ${total} suggestion${total === 1 ? '' : 's'}:**`, '');
-  }
+  const newLabel = newCount > 0 ? ` (${newCount} new since last analysis)` : '';
+  sections.push(`**Found ${total} issue${total === 1 ? '' : 's'}${newLabel}:**`, '');
 
   // Apply MAX_ISSUES limit first, then filter by severity
-  const limitedIssues = issues.slice(0, MAX_ISSUES);
+  const limitedIssues = allIssues.slice(0, MAX_ISSUES);
 
+  const critical = limitedIssues.filter(i => i.severity === 'CRITICAL');
+  const important = limitedIssues.filter(i => i.severity === 'IMPORTANT');
   const suggestions = limitedIssues.filter(i => i.severity === 'SUGGESTION');
   const nits = limitedIssues.filter(i => i.severity === 'NIT');
+
+  if (critical.length > 0) {
+    sections.push('### 🔴 Critical Issues', '');
+    for (const issue of critical) {
+      const isNew = newIssues.includes(issue);
+      sections.push(formatIssueItem(issue, isNew));
+    }
+  }
+
+  if (important.length > 0) {
+    sections.push('### 🟠 Important Issues', '');
+    for (const issue of important) {
+      const isNew = newIssues.includes(issue);
+      sections.push(formatIssueItem(issue, isNew));
+    }
+  }
 
   if (suggestions.length > 0) {
     sections.push('### 🟡 Suggestions', '');
@@ -87,10 +102,6 @@ export function formatIssueComment(
       const isNew = newIssues.includes(issue);
       sections.push(formatIssueItem(issue, isNew));
     }
-  }
-
-  if (suggestions.length === 0 && nits.length === 0) {
-    sections.push('No suggestions at this time.');
   }
 
   sections.push('');

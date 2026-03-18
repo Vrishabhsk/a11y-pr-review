@@ -31436,10 +31436,7 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.getPRInfo = getPRInfo;
 exports.getPRFiles = getPRFiles;
-exports.getCommitsBetween = getCommitsBetween;
 exports.getFilesChangedBetween = getFilesChangedBetween;
-exports.getFileContent = getFileContent;
-exports.getReviewComments = getReviewComments;
 exports.createReview = createReview;
 const core = __importStar(__nccwpck_require__(7484));
 async function getPRInfo(octokit, owner, repo, prNumber) {
@@ -31483,29 +31480,6 @@ async function getPRFiles(octokit, owner, repo, prNumber) {
     }
     return files;
 }
-async function getCommitsBetween(octokit, owner, repo, baseSha, headSha) {
-    const commits = [];
-    try {
-        const { data: comparison } = await octokit.rest.repos.compareCommits({
-            owner,
-            repo,
-            base: baseSha,
-            head: headSha,
-        });
-        if (comparison.commits) {
-            for (const commit of comparison.commits) {
-                commits.push({
-                    sha: commit.sha,
-                    message: commit.commit.message,
-                });
-            }
-        }
-    }
-    catch (error) {
-        core.warning(`Failed to compare commits: ${error}`);
-    }
-    return commits;
-}
 async function getFilesChangedBetween(octokit, owner, repo, baseSha, headSha) {
     const changedFiles = new Set();
     try {
@@ -31530,51 +31504,6 @@ async function getFilesChangedBetween(octokit, owner, repo, baseSha, headSha) {
         core.warning(`Failed to get changed files: ${error}`);
     }
     return changedFiles;
-}
-async function getFileContent(octokit, owner, repo, path, ref) {
-    try {
-        const { data } = await octokit.rest.repos.getContent({
-            owner,
-            repo,
-            path,
-            ref,
-        });
-        if ('content' in data && data.type === 'file') {
-            return Buffer.from(data.content, 'base64').toString('utf-8');
-        }
-    }
-    catch (error) {
-        core.warning(`Failed to get file content for ${path}: ${error}`);
-    }
-    return '';
-}
-async function getReviewComments(octokit, owner, repo, prNumber) {
-    const comments = [];
-    let page = 1;
-    const perPage = 100;
-    while (true) {
-        const { data } = await octokit.rest.pulls.listReviewComments({
-            owner,
-            repo,
-            pull_number: prNumber,
-            per_page: perPage,
-            page,
-        });
-        if (data.length === 0)
-            break;
-        for (const comment of data) {
-            comments.push({
-                id: comment.id,
-                path: comment.path,
-                line: comment.line || comment.original_line || null,
-                body: comment.body,
-            });
-        }
-        if (data.length < perPage)
-            break;
-        page++;
-    }
-    return comments;
 }
 async function createReview(octokit, owner, repo, prNumber, headSha, issues, filePatches) {
     const comments = [];
@@ -31733,20 +31662,12 @@ function formatIssueComment(allIssues, newIssues, summary) {
     }
     const newLabel = newCount > 0 ? ` (${newCount} new since last analysis)` : '';
     sections.push(`**Found ${total} issue${total === 1 ? '' : 's'}${newLabel}:**`, '');
-    const persistedFiles = new Set();
-    for (const issue of allIssues) {
-        if (!newIssues.includes(issue)) {
-            persistedFiles.add(issue.file);
-        }
-    }
-    const newFiles = new Set();
-    for (const issue of newIssues) {
-        newFiles.add(issue.file);
-    }
-    const critical = allIssues.filter(i => i.severity === 'CRITICAL').slice(0, types_1.MAX_ISSUES);
-    const important = allIssues.filter(i => i.severity === 'IMPORTANT').slice(0, types_1.MAX_ISSUES);
-    const suggestions = allIssues.filter(i => i.severity === 'SUGGESTION').slice(0, types_1.MAX_ISSUES);
-    const nits = allIssues.filter(i => i.severity === 'NIT').slice(0, types_1.MAX_ISSUES);
+    // Apply MAX_ISSUES limit to ALL issues first, then filter by severity
+    const limitedIssues = allIssues.slice(0, types_1.MAX_ISSUES);
+    const critical = limitedIssues.filter(i => i.severity === 'CRITICAL');
+    const important = limitedIssues.filter(i => i.severity === 'IMPORTANT');
+    const suggestions = limitedIssues.filter(i => i.severity === 'SUGGESTION');
+    const nits = limitedIssues.filter(i => i.severity === 'NIT');
     if (critical.length > 0) {
         sections.push('### 🔴 Critical Issues', '');
         for (const issue of critical) {
@@ -31929,7 +31850,6 @@ async function run() {
         const prompt = (0, prompts_1.buildPrompt)(owner, repo, prNumber);
         let allIssues;
         let newIssues;
-        let filesAnalyzed;
         if (!previousRun) {
             core.info('First run: Analyzing all PR files');
             const allFiles = await (0, client_1.getPRFiles)(octokit, owner, repo, prNumber);
@@ -31947,7 +31867,6 @@ async function run() {
             const result = await (0, batch_1.analyzeFilesInBatches)(relevantFiles, llmBackend, apiKey, model, ollamaUrl, prompt);
             allIssues = result.issues;
             newIssues = result.issues;
-            filesAnalyzed = result.filesAnalyzed;
             const issuesByFile = (0, types_1.groupIssuesByFile)(allIssues.slice(0, types_1.MAX_ISSUES));
             const state = {
                 version: 1,
@@ -32002,7 +31921,6 @@ async function run() {
             }
             const result = await (0, batch_1.analyzeFilesInBatches)(relevantChangedFiles, llmBackend, apiKey, model, ollamaUrl, prompt);
             newIssues = result.issues;
-            filesAnalyzed = result.filesAnalyzed;
             const existingIssues = [];
             for (const [file, issues] of Object.entries(previousRun.state.issuesByFile)) {
                 if (!changedFiles.has(file)) {
@@ -32123,7 +32041,6 @@ const types_1 = __nccwpck_require__(9520);
 const diff_parser_1 = __nccwpck_require__(5597);
 async function analyzeFilesInBatches(files, llmBackend, apiKey, model, ollamaUrl, prompt) {
     const allIssues = [];
-    const filesAnalyzed = [];
     const batches = [];
     for (let i = 0; i < files.length; i += types_1.BATCH_SIZE) {
         batches.push(files.slice(i, i + types_1.BATCH_SIZE));
@@ -32146,9 +32063,6 @@ async function analyzeFilesInBatches(files, llmBackend, apiKey, model, ollamaUrl
             for (const issue of result.issues) {
                 allIssues.push(issue);
             }
-            for (const file of batch) {
-                filesAnalyzed.push(file.filename);
-            }
             core.info(`Batch ${batchNum}: Found ${result.issues.length} issues`);
             if (batches.length > 1 && i < batches.length - 1) {
                 await new Promise(resolve => setTimeout(resolve, 1000));
@@ -32160,7 +32074,6 @@ async function analyzeFilesInBatches(files, llmBackend, apiKey, model, ollamaUrl
     }
     return {
         issues: allIssues,
-        filesAnalyzed,
     };
 }
 
@@ -32808,7 +32721,6 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.BATCH_SIZE = exports.MAX_ISSUES = void 0;
 exports.getCheckRunName = getCheckRunName;
 exports.hashIssue = hashIssue;
-exports.parseIssueHash = parseIssueHash;
 exports.groupIssuesByFile = groupIssuesByFile;
 exports.flattenIssues = flattenIssues;
 const CHECK_RUN_NAME_PREFIX = 'Accessibility Review';
@@ -32818,16 +32730,6 @@ function getCheckRunName(prNumber) {
 function hashIssue(issue) {
     const title = issue.title || issue.description || '';
     return `${issue.file}:${issue.wcag_criterion}:${title}`;
-}
-function parseIssueHash(hash) {
-    const parts = hash.split(':');
-    if (parts.length < 3)
-        return null;
-    return {
-        file: parts[0],
-        wcag_criterion: parts[1],
-        title: parts.slice(2).join(':'),
-    };
 }
 function groupIssuesByFile(issues) {
     const grouped = {};

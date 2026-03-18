@@ -10,7 +10,6 @@ interface LLMClient {
 
 interface BatchResult {
   issues: A11yIssue[];
-  filesAnalyzed: string[];
 }
 
 export async function analyzeFilesInBatches(
@@ -22,7 +21,6 @@ export async function analyzeFilesInBatches(
   prompt: string
 ): Promise<BatchResult> {
   const allIssues: A11yIssue[] = [];
-  const filesAnalyzed: string[] = [];
 
   const batches: FilePatch[][] = [];
   for (let i = 0; i < files.length; i += BATCH_SIZE) {
@@ -55,10 +53,6 @@ export async function analyzeFilesInBatches(
         allIssues.push(issue);
       }
 
-      for (const file of batch) {
-        filesAnalyzed.push(file.filename);
-      }
-
       core.info(`Batch ${batchNum}: Found ${result.issues.length} issues`);
 
       if (batches.length > 1 && i < batches.length - 1) {
@@ -71,6 +65,5 @@ export async function analyzeFilesInBatches(
 
   return {
     issues: allIssues,
-    filesAnalyzed,
   };
 }

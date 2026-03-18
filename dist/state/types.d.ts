@@ -30,23 +30,8 @@ export interface PRInfo {
     baseSha: string;
     title?: string;
 }
-export interface ReviewCommentInfo {
-    id: number;
-    path: string;
-    line: number | null;
-    body: string;
-}
-export interface CommitInfo {
-    sha: string;
-    message: string;
-}
 export declare function getCheckRunName(prNumber: number): string;
 export declare function hashIssue(issue: A11yIssue): string;
-export declare function parseIssueHash(hash: string): {
-    file: string;
-    wcag_criterion: string;
-    title: string;
-} | null;
 export declare function groupIssuesByFile(issues: A11yIssue[]): Record<string, A11yIssue[]>;
 export declare function flattenIssues(issuesByFile: Record<string, A11yIssue[]>): A11yIssue[];
 export declare const MAX_ISSUES = 100;

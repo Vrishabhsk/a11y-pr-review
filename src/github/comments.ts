@@ -64,22 +64,13 @@ export function formatIssueComment(
   const newLabel = newCount > 0 ? ` (${newCount} new since last analysis)` : '';
   sections.push(`**Found ${total} issue${total === 1 ? '' : 's'}${newLabel}:**`, '');
 
-  const persistedFiles = new Set<string>();
-  for (const issue of allIssues) {
-    if (!newIssues.includes(issue)) {
-      persistedFiles.add(issue.file);
-    }
-  }
+  // Apply MAX_ISSUES limit to ALL issues first, then filter by severity
+  const limitedIssues = allIssues.slice(0, MAX_ISSUES);
 
-  const newFiles = new Set<string>();
-  for (const issue of newIssues) {
-    newFiles.add(issue.file);
-  }
-
-  const critical = allIssues.filter(i => i.severity === 'CRITICAL').slice(0, MAX_ISSUES);
-  const important = allIssues.filter(i => i.severity === 'IMPORTANT').slice(0, MAX_ISSUES);
-  const suggestions = allIssues.filter(i => i.severity === 'SUGGESTION').slice(0, MAX_ISSUES);
-  const nits = allIssues.filter(i => i.severity === 'NIT').slice(0, MAX_ISSUES);
+  const critical = limitedIssues.filter(i => i.severity === 'CRITICAL');
+  const important = limitedIssues.filter(i => i.severity === 'IMPORTANT');
+  const suggestions = limitedIssues.filter(i => i.severity === 'SUGGESTION');
+  const nits = limitedIssues.filter(i => i.severity === 'NIT');
 
   if (critical.length > 0) {
     sections.push('### 🔴 Critical Issues', '');

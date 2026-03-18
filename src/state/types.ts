@@ -35,18 +35,6 @@ export interface PRInfo {
   title?: string;
 }
 
-export interface ReviewCommentInfo {
-  id: number;
-  path: string;
-  line: number | null;
-  body: string;
-}
-
-export interface CommitInfo {
-  sha: string;
-  message: string;
-}
-
 const CHECK_RUN_NAME_PREFIX = 'Accessibility Review';
 
 export function getCheckRunName(prNumber: number): string {
@@ -56,16 +44,6 @@ export function getCheckRunName(prNumber: number): string {
 export function hashIssue(issue: A11yIssue): string {
   const title = issue.title || issue.description || '';
   return `${issue.file}:${issue.wcag_criterion}:${title}`;
-}
-
-export function parseIssueHash(hash: string): { file: string; wcag_criterion: string; title: string } | null {
-  const parts = hash.split(':');
-  if (parts.length < 3) return null;
-  return {
-    file: parts[0],
-    wcag_criterion: parts[1],
-    title: parts.slice(2).join(':'),
-  };
 }
 
 export function groupIssuesByFile(issues: A11yIssue[]): Record<string, A11yIssue[]> {

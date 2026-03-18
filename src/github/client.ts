@@ -1,6 +1,6 @@
 import * as core from '@actions/core';
 import * as github from '@actions/github';
-import { A11yIssue, FilePatch, PRInfo, CommitInfo, ReviewCommentInfo } from '../state/types';
+import { A11yIssue, FilePatch, PRInfo } from '../state/types';
 
 type Octokit = ReturnType<typeof github.getOctokit>;
 
@@ -61,38 +61,6 @@ export async function getPRFiles(
   return files;
 }
 
-export async function getCommitsBetween(
-  octokit: Octokit,
-  owner: string,
-  repo: string,
-  baseSha: string,
-  headSha: string
-): Promise<CommitInfo[]> {
-  const commits: CommitInfo[] = [];
-  
-  try {
-    const { data: comparison } = await octokit.rest.repos.compareCommits({
-      owner,
-      repo,
-      base: baseSha,
-      head: headSha,
-    });
-
-    if (comparison.commits) {
-      for (const commit of comparison.commits) {
-        commits.push({
-          sha: commit.sha,
-          message: commit.commit.message,
-        });
-      }
-    }
-  } catch (error) {
-    core.warning(`Failed to compare commits: ${error}`);
-  }
-
-  return commits;
-}
-
 export async function getFilesChangedBetween(
   octokit: Octokit,
   owner: string,
@@ -125,68 +93,6 @@ export async function getFilesChangedBetween(
   }
 
   return changedFiles;
-}
-
-export async function getFileContent(
-  octokit: Octokit,
-  owner: string,
-  repo: string,
-  path: string,
-  ref: string
-): Promise<string> {
-  try {
-    const { data } = await octokit.rest.repos.getContent({
-      owner,
-      repo,
-      path,
-      ref,
-    });
-
-    if ('content' in data && data.type === 'file') {
-      return Buffer.from(data.content, 'base64').toString('utf-8');
-    }
-  } catch (error) {
-    core.warning(`Failed to get file content for ${path}: ${error}`);
-  }
-
-  return '';
-}
-
-export async function getReviewComments(
-  octokit: Octokit,
-  owner: string,
-  repo: string,
-  prNumber: number
-): Promise<ReviewCommentInfo[]> {
-  const comments: ReviewCommentInfo[] = [];
-  let page = 1;
-  const perPage = 100;
-
-  while (true) {
-    const { data } = await octokit.rest.pulls.listReviewComments({
-      owner,
-      repo,
-      pull_number: prNumber,
-      per_page: perPage,
-      page,
-    });
-
-    if (data.length === 0) break;
-
-    for (const comment of data) {
-      comments.push({
-        id: comment.id,
-        path: comment.path,
-        line: comment.line || comment.original_line || null,
-        body: comment.body,
-      });
-    }
-
-    if (data.length < perPage) break;
-    page++;
-  }
-
-  return comments;
 }
 
 export async function createReview(

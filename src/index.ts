@@ -1,7 +1,5 @@
 import * as core from '@actions/core';
 import * as github from '@actions/github';
-import { GeminiClient } from './llm/gemini-client';
-import { OllamaClient } from './llm/ollama-client';
 import { analyzeFilesInBatches } from './llm/batch';
 import { buildPrompt } from './prompts';
 import { isAccessibilityRelevant } from './parsers/diff-parser';
@@ -24,7 +22,6 @@ import {
   getPRInfo,
   getPRFiles,
   getFilesChangedBetween,
-  getReviewComments,
   createReview,
 } from './github/client';
 import {
@@ -100,7 +97,6 @@ async function run(): Promise<void> {
     const prompt = buildPrompt(owner, repo, prNumber);
     let allIssues: A11yIssue[];
     let newIssues: A11yIssue[];
-    let filesAnalyzed: string[];
 
     if (!previousRun) {
       core.info('First run: Analyzing all PR files');
@@ -133,7 +129,6 @@ async function run(): Promise<void> {
 
       allIssues = result.issues;
       newIssues = result.issues;
-      filesAnalyzed = result.filesAnalyzed;
 
       const issuesByFile = groupIssuesByFile(allIssues.slice(0, MAX_ISSUES));
       const state: CheckRunState = {
@@ -241,7 +236,6 @@ async function run(): Promise<void> {
       );
 
       newIssues = result.issues;
-      filesAnalyzed = result.filesAnalyzed;
 
       const existingIssues: A11yIssue[] = [];
       for (const [file, issues] of Object.entries(previousRun.state.issuesByFile)) {

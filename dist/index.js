@@ -32877,36 +32877,59 @@ class OllamaClient {
     }
     parseResponse(content) {
         try {
-            let parsed;
-            const jsonMatch = content.match(/\{[\s\S]*\}/);
-            if (jsonMatch) {
-                parsed = JSON.parse(jsonMatch[0]);
+            // Try parsing the entire content as JSON first
+            try {
+                const parsed = JSON.parse(content);
+                return this.extractIssues(parsed);
             }
-            else {
-                parsed = JSON.parse(content);
+            catch {
+                // Content might have extra text, extract JSON object
             }
-            const issues = (parsed.issues || []).map((issue) => {
-                const rawSeverity = String(issue.severity || 'GOOD_PRACTICE').toUpperCase();
-                const severity = rawSeverity === 'VIOLATION' ? 'VIOLATION' : 'GOOD_PRACTICE';
-                return {
-                    file: String(issue.file || ''),
-                    line: issue.line ? Number(issue.line) : null,
-                    wcag_criterion: String(issue.wcag_criterion || ''),
-                    wcag_level: String(issue.wcag_level || 'A'),
-                    severity,
-                    title: String(issue.title || ''),
-                    description: String(issue.description || ''),
-                    suggestion: String(issue.suggestion || ''),
-                };
-            });
-            return {
-                issues,
-                summary: String(parsed.summary || 'Accessibility review completed.'),
-            };
+            // Find JSON object by matching brackets
+            const startIndex = content.indexOf('{');
+            if (startIndex === -1) {
+                throw new Error('No JSON object found in response');
+            }
+            let depth = 0;
+            let endIndex = startIndex;
+            for (let i = startIndex; i < content.length; i++) {
+                if (content[i] === '{')
+                    depth++;
+                if (content[i] === '}')
+                    depth--;
+                if (depth === 0) {
+                    endIndex = i + 1;
+                    break;
+                }
+            }
+            const jsonStr = content.substring(startIndex, endIndex);
+            const parsed = JSON.parse(jsonStr);
+            return this.extractIssues(parsed);
         }
         catch (parseError) {
+            console.error('Raw Ollama response:', content.substring(0, 500));
             throw new Error(`Failed to parse Ollama response: ${parseError instanceof Error ? parseError.message : String(parseError)}`);
         }
+    }
+    extractIssues(parsed) {
+        const issues = (parsed.issues || []).map((issue) => {
+            const rawSeverity = String(issue.severity || 'GOOD_PRACTICE').toUpperCase();
+            const severity = rawSeverity === 'VIOLATION' ? 'VIOLATION' : 'GOOD_PRACTICE';
+            return {
+                file: String(issue.file || ''),
+                line: issue.line ? Number(issue.line) : null,
+                wcag_criterion: String(issue.wcag_criterion || ''),
+                wcag_level: String(issue.wcag_level || 'A'),
+                severity,
+                title: String(issue.title || ''),
+                description: String(issue.description || ''),
+                suggestion: String(issue.suggestion || ''),
+            };
+        });
+        return {
+            issues,
+            summary: String(parsed.summary || 'Accessibility review completed.'),
+        };
     }
 }
 exports.OllamaClient = OllamaClient;

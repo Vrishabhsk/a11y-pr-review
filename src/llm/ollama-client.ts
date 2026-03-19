@@ -68,37 +68,61 @@ export class OllamaClient {
 
   private parseResponse(content: string): AnalysisResult {
     try {
-      let parsed: Record<string, unknown>;
-      
-      const jsonMatch = content.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        parsed = JSON.parse(jsonMatch[0]);
-      } else {
-        parsed = JSON.parse(content);
+      // Try parsing the entire content as JSON first
+      try {
+        const parsed = JSON.parse(content);
+        return this.extractIssues(parsed);
+      } catch {
+        // Content might have extra text, extract JSON object
       }
 
-      const issues: A11yIssue[] = ((parsed.issues as Array<Record<string, unknown>>) || []).map((issue) => {
-        const rawSeverity = String(issue.severity || 'GOOD_PRACTICE').toUpperCase();
-        const severity: A11yIssue['severity'] = rawSeverity === 'VIOLATION' ? 'VIOLATION' : 'GOOD_PRACTICE';
-        
-        return {
-          file: String(issue.file || ''),
-          line: issue.line ? Number(issue.line) : null,
-          wcag_criterion: String(issue.wcag_criterion || ''),
-          wcag_level: String(issue.wcag_level || 'A'),
-          severity,
-          title: String(issue.title || ''),
-          description: String(issue.description || ''),
-          suggestion: String(issue.suggestion || ''),
-        };
-      });
+      // Find JSON object by matching brackets
+      const startIndex = content.indexOf('{');
+      if (startIndex === -1) {
+        throw new Error('No JSON object found in response');
+      }
 
-      return {
-        issues,
-        summary: String(parsed.summary || 'Accessibility review completed.'),
-      };
+      let depth = 0;
+      let endIndex = startIndex;
+
+      for (let i = startIndex; i < content.length; i++) {
+        if (content[i] === '{') depth++;
+        if (content[i] === '}') depth--;
+        if (depth === 0) {
+          endIndex = i + 1;
+          break;
+        }
+      }
+
+      const jsonStr = content.substring(startIndex, endIndex);
+      const parsed = JSON.parse(jsonStr);
+      return this.extractIssues(parsed);
     } catch (parseError) {
+      console.error('Raw Ollama response:', content.substring(0, 500));
       throw new Error(`Failed to parse Ollama response: ${parseError instanceof Error ? parseError.message : String(parseError)}`);
     }
+  }
+
+  private extractIssues(parsed: Record<string, unknown>): AnalysisResult {
+    const issues: A11yIssue[] = ((parsed.issues as Array<Record<string, unknown>>) || []).map((issue) => {
+      const rawSeverity = String(issue.severity || 'GOOD_PRACTICE').toUpperCase();
+      const severity: A11yIssue['severity'] = rawSeverity === 'VIOLATION' ? 'VIOLATION' : 'GOOD_PRACTICE';
+      
+      return {
+        file: String(issue.file || ''),
+        line: issue.line ? Number(issue.line) : null,
+        wcag_criterion: String(issue.wcag_criterion || ''),
+        wcag_level: String(issue.wcag_level || 'A'),
+        severity,
+        title: String(issue.title || ''),
+        description: String(issue.description || ''),
+        suggestion: String(issue.suggestion || ''),
+      };
+    });
+
+    return {
+      issues,
+      summary: String(parsed.summary || 'Accessibility review completed.'),
+    };
   }
 }

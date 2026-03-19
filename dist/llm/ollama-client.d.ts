@@ -9,6 +9,7 @@ export declare class OllamaClient {
     constructor(host?: string, model?: string, apiKey?: string);
     analyze(diffContent: string, prompt: string): Promise<AnalysisResult>;
     private parseResponse;
+    private extractIssues;
 }
 export {};
 //# sourceMappingURL=ollama-client.d.ts.map

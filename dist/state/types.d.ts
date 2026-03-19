@@ -8,16 +8,6 @@ export interface A11yIssue {
     description: string;
     suggestion: string;
 }
-export interface CheckRunState {
-    version: number;
-    lastAnalyzedHeadSha: string;
-    prNumber: number;
-    issuesByFile: Record<string, A11yIssue[]>;
-}
-export interface PreviousRun {
-    checkRunId: number;
-    state: CheckRunState;
-}
 export interface FilePatch {
     filename: string;
     patch: string;
@@ -30,10 +20,6 @@ export interface PRInfo {
     baseSha: string;
     title?: string;
 }
-export declare function getCheckRunName(prNumber: number): string;
-export declare function hashIssue(issue: A11yIssue): string;
-export declare function groupIssuesByFile(issues: A11yIssue[]): Record<string, A11yIssue[]>;
-export declare function flattenIssues(issuesByFile: Record<string, A11yIssue[]>): A11yIssue[];
 export declare const MAX_ISSUES = 100;
 export declare const BATCH_SIZE = 20;
 //# sourceMappingURL=types.d.ts.map

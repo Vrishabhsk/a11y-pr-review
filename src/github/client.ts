@@ -62,40 +62,6 @@ export async function getPRFiles(
   return files;
 }
 
-export async function getFilesChangedBetween(
-  octokit: Octokit,
-  owner: string,
-  repo: string,
-  baseSha: string,
-  headSha: string
-): Promise<Set<string>> {
-  const changedFiles = new Set<string>();
-
-  try {
-    const { data: comparison } = await octokit.rest.repos.compareCommits({
-      owner,
-      repo,
-      base: baseSha,
-      head: headSha,
-    });
-
-    if (comparison.files) {
-      for (const file of comparison.files) {
-        if (file.status !== 'removed') {
-          changedFiles.add(file.filename);
-        }
-        if (file.previous_filename && file.status === 'renamed') {
-          changedFiles.add(file.previous_filename);
-        }
-      }
-    }
-  } catch (error) {
-    core.warning(`Failed to get changed files: ${error}`);
-  }
-
-  return changedFiles;
-}
-
 export async function createReview(
   octokit: Octokit,
   owner: string,
@@ -114,11 +80,9 @@ export async function createReview(
 
   const failedInlineIssues: A11yIssue[] = [];
 
-  // Try to create inline comments for CRITICAL and IMPORTANT
   for (const issue of criticalAndImportant) {
     if (!issue) continue;
     
-    // Issues without line numbers go to failed
     if (!issue.line || issue.line < 1 || !issue.file) {
       failedInlineIssues.push(issue);
       continue;
@@ -143,8 +107,7 @@ export async function createReview(
     });
   }
 
-  // Build review body - SUGGESTION/NIT + FAILED inline (CRITICAL/IMPORTANT fallback)
-  const body = formatReviewBody(suggestionsAndNits, failedInlineIssues);
+  const body = formatReviewBody(criticalAndImportant, suggestionsAndNits, comments.length, failedInlineIssues.length);
 
   const { data: review } = await octokit.rest.pulls.createReview({
     owner,
@@ -160,57 +123,76 @@ export async function createReview(
     })),
   });
 
-  core.info(`Created review with ${comments.length} inline comments, ${failedInlineIssues.length} issues in body (no line info)`);
+  core.info(`Created review with ${comments.length} inline comments`);
   return { reviewId: review.id, postedInlineCount: comments.length, failedInlineIssues };
 }
 
-function formatReviewBody(suggestionsAndNits: A11yIssue[], failedInlineIssues: A11yIssue[] = []): string {
-  const hasContent = suggestionsAndNits.length > 0 || failedInlineIssues.length > 0;
+function formatReviewBody(
+  criticalAndImportant: A11yIssue[],
+  suggestionsAndNits: A11yIssue[],
+  postedInlineCount: number,
+  failedInlineCount: number
+): string {
+  const critical = criticalAndImportant.filter(i => i?.severity === 'CRITICAL');
+  const important = criticalAndImportant.filter(i => i?.severity === 'IMPORTANT');
+  const suggestions = suggestionsAndNits.filter(i => i?.severity === 'SUGGESTION');
+  const nits = suggestionsAndNits.filter(i => i?.severity === 'NIT');
 
-  if (!hasContent) {
+  const totalCritical = critical.length;
+  const totalImportant = important.length;
+  const totalSuggestions = suggestions.length;
+  const totalNits = nits.length;
+  const totalIssues = totalCritical + totalImportant + totalSuggestions + totalNits;
+
+  if (totalIssues === 0) {
     return '## ♿ Accessibility Review\n\n✅ No issues found.';
   }
 
   const sections: string[] = ['## ♿ Accessibility Review', ''];
 
-  // Failed inline issues (CRITICAL/IMPORTANT without line numbers) - go in body as fallback
-  if (failedInlineIssues.length > 0) {
-    const critical = failedInlineIssues.filter(i => i?.severity === 'CRITICAL');
-    const important = failedInlineIssues.filter(i => i?.severity === 'IMPORTANT');
+  // Summary line
+  const parts: string[] = [];
+  if (totalCritical > 0) parts.push(`🔴 ${totalCritical} critical`);
+  if (totalImportant > 0) parts.push(`🟡 ${totalImportant} important`);
+  if (totalSuggestions > 0) parts.push(`🟢 ${totalSuggestions} suggestion${totalSuggestions !== 1 ? 's' : ''}`);
+  if (totalNits > 0) parts.push(`⚪ ${totalNits} nit${totalNits !== 1 ? 's' : ''}`);
 
-    if (critical.length > 0) {
-      sections.push('### 🔴 Critical Issues');
-      sections.push('');
-      for (const issue of critical) {
-        if (!issue) continue;
-        sections.push(`**${issue.file || 'Unknown file'}**`);
-        sections.push(`- ${issue.title || issue.description || 'No description'}`);
-        if (issue.wcag_criterion) {
-          sections.push(`  - WCAG ${issue.wcag_criterion} (Level ${issue.wcag_level || 'A'})`);
-        }
-        sections.push('');
-      }
+  const inlinePosted = postedInlineCount + failedInlineCount;
+  if (inlinePosted > 0) {
+    sections.push(`**Found ${totalIssues} issue${totalIssues !== 1 ? 's' : ''}:** ${parts.join(', ')}`);
+    if (postedInlineCount > 0) {
+      sections.push(`\n*${postedInlineCount} critical/important issue${postedInlineCount !== 1 ? 's' : ''} posted as inline comments above.*`);
     }
-
-    if (important.length > 0) {
-      sections.push('### 🟡 Important Issues');
-      sections.push('');
-      for (const issue of important) {
-        if (!issue) continue;
-        sections.push(`**${issue.file || 'Unknown file'}**`);
-        sections.push(`- ${issue.title || issue.description || 'No description'}`);
-        if (issue.wcag_criterion) {
-          sections.push(`  - WCAG ${issue.wcag_criterion} (Level ${issue.wcag_level || 'A'})`);
-        }
-        sections.push('');
-      }
-    }
+    sections.push('');
   }
 
-  const suggestions = suggestionsAndNits.filter(i => i?.severity === 'SUGGESTION');
-  const nits = suggestionsAndNits.filter(i => i?.severity === 'NIT');
+  // Failed inline issues (CRITICAL/IMPORTANT without line numbers)
+  if (failedInlineCount > 0) {
+    sections.push('### ⚠️ Issues Without Line Numbers');
+    sections.push('');
+    
+    for (const issue of critical) {
+      if (!issue.line || issue.line < 1) {
+        sections.push(`- **${issue.file || 'Unknown'}**: ${issue.title || issue.description || 'No description'}`);
+        if (issue.wcag_criterion) {
+          sections.push(`  - WCAG ${issue.wcag_criterion} (Level ${issue.wcag_level || 'A'})`);
+        }
+      }
+    }
+    
+    for (const issue of important) {
+      if (!issue.line || issue.line < 1) {
+        sections.push(`- **${issue.file || 'Unknown'}**: ${issue.title || issue.description || 'No description'}`);
+        if (issue.wcag_criterion) {
+          sections.push(`  - WCAG ${issue.wcag_criterion} (Level ${issue.wcag_level || 'A'})`);
+        }
+      }
+    }
+    sections.push('');
+  }
 
-  if (suggestions.length > 0) {
+  // SUGGESTION details
+  if (totalSuggestions > 0) {
     sections.push('### 🟢 Suggestions');
     sections.push('');
     for (const issue of suggestions) {
@@ -225,7 +207,8 @@ function formatReviewBody(suggestionsAndNits: A11yIssue[], failedInlineIssues: A
     }
   }
 
-  if (nits.length > 0) {
+  // NIT details
+  if (totalNits > 0) {
     sections.push('### ⚪ Minor Issues');
     sections.push('');
     for (const issue of nits) {

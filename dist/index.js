@@ -31436,7 +31436,6 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.getPRInfo = getPRInfo;
 exports.getPRFiles = getPRFiles;
-exports.getFilesChangedBetween = getFilesChangedBetween;
 exports.createReview = createReview;
 const core = __importStar(__nccwpck_require__(7484));
 async function getPRInfo(octokit, owner, repo, prNumber) {
@@ -31481,39 +31480,12 @@ async function getPRFiles(octokit, owner, repo, prNumber) {
     }
     return files;
 }
-async function getFilesChangedBetween(octokit, owner, repo, baseSha, headSha) {
-    const changedFiles = new Set();
-    try {
-        const { data: comparison } = await octokit.rest.repos.compareCommits({
-            owner,
-            repo,
-            base: baseSha,
-            head: headSha,
-        });
-        if (comparison.files) {
-            for (const file of comparison.files) {
-                if (file.status !== 'removed') {
-                    changedFiles.add(file.filename);
-                }
-                if (file.previous_filename && file.status === 'renamed') {
-                    changedFiles.add(file.previous_filename);
-                }
-            }
-        }
-    }
-    catch (error) {
-        core.warning(`Failed to get changed files: ${error}`);
-    }
-    return changedFiles;
-}
 async function createReview(octokit, owner, repo, prNumber, headSha, criticalAndImportant, suggestionsAndNits, filePatches) {
     const comments = [];
     const failedInlineIssues = [];
-    // Try to create inline comments for CRITICAL and IMPORTANT
     for (const issue of criticalAndImportant) {
         if (!issue)
             continue;
-        // Issues without line numbers go to failed
         if (!issue.line || issue.line < 1 || !issue.file) {
             failedInlineIssues.push(issue);
             continue;
@@ -31534,8 +31506,7 @@ async function createReview(octokit, owner, repo, prNumber, headSha, criticalAnd
             body: formatInlineComment(issue),
         });
     }
-    // Build review body - SUGGESTION/NIT + FAILED inline (CRITICAL/IMPORTANT fallback)
-    const body = formatReviewBody(suggestionsAndNits, failedInlineIssues);
+    const body = formatReviewBody(criticalAndImportant, suggestionsAndNits, comments.length, failedInlineIssues.length);
     const { data: review } = await octokit.rest.pulls.createReview({
         owner,
         repo,
@@ -31549,51 +31520,65 @@ async function createReview(octokit, owner, repo, prNumber, headSha, criticalAnd
             body: c.body,
         })),
     });
-    core.info(`Created review with ${comments.length} inline comments, ${failedInlineIssues.length} issues in body (no line info)`);
+    core.info(`Created review with ${comments.length} inline comments`);
     return { reviewId: review.id, postedInlineCount: comments.length, failedInlineIssues };
 }
-function formatReviewBody(suggestionsAndNits, failedInlineIssues = []) {
-    const hasContent = suggestionsAndNits.length > 0 || failedInlineIssues.length > 0;
-    if (!hasContent) {
+function formatReviewBody(criticalAndImportant, suggestionsAndNits, postedInlineCount, failedInlineCount) {
+    const critical = criticalAndImportant.filter(i => i?.severity === 'CRITICAL');
+    const important = criticalAndImportant.filter(i => i?.severity === 'IMPORTANT');
+    const suggestions = suggestionsAndNits.filter(i => i?.severity === 'SUGGESTION');
+    const nits = suggestionsAndNits.filter(i => i?.severity === 'NIT');
+    const totalCritical = critical.length;
+    const totalImportant = important.length;
+    const totalSuggestions = suggestions.length;
+    const totalNits = nits.length;
+    const totalIssues = totalCritical + totalImportant + totalSuggestions + totalNits;
+    if (totalIssues === 0) {
         return '## ♿ Accessibility Review\n\n✅ No issues found.';
     }
     const sections = ['## ♿ Accessibility Review', ''];
-    // Failed inline issues (CRITICAL/IMPORTANT without line numbers) - go in body as fallback
-    if (failedInlineIssues.length > 0) {
-        const critical = failedInlineIssues.filter(i => i?.severity === 'CRITICAL');
-        const important = failedInlineIssues.filter(i => i?.severity === 'IMPORTANT');
-        if (critical.length > 0) {
-            sections.push('### 🔴 Critical Issues');
-            sections.push('');
-            for (const issue of critical) {
-                if (!issue)
-                    continue;
-                sections.push(`**${issue.file || 'Unknown file'}**`);
-                sections.push(`- ${issue.title || issue.description || 'No description'}`);
-                if (issue.wcag_criterion) {
-                    sections.push(`  - WCAG ${issue.wcag_criterion} (Level ${issue.wcag_level || 'A'})`);
-                }
-                sections.push('');
-            }
+    // Summary line
+    const parts = [];
+    if (totalCritical > 0)
+        parts.push(`🔴 ${totalCritical} critical`);
+    if (totalImportant > 0)
+        parts.push(`🟡 ${totalImportant} important`);
+    if (totalSuggestions > 0)
+        parts.push(`🟢 ${totalSuggestions} suggestion${totalSuggestions !== 1 ? 's' : ''}`);
+    if (totalNits > 0)
+        parts.push(`⚪ ${totalNits} nit${totalNits !== 1 ? 's' : ''}`);
+    const inlinePosted = postedInlineCount + failedInlineCount;
+    if (inlinePosted > 0) {
+        sections.push(`**Found ${totalIssues} issue${totalIssues !== 1 ? 's' : ''}:** ${parts.join(', ')}`);
+        if (postedInlineCount > 0) {
+            sections.push(`\n*${postedInlineCount} critical/important issue${postedInlineCount !== 1 ? 's' : ''} posted as inline comments above.*`);
         }
-        if (important.length > 0) {
-            sections.push('### 🟡 Important Issues');
-            sections.push('');
-            for (const issue of important) {
-                if (!issue)
-                    continue;
-                sections.push(`**${issue.file || 'Unknown file'}**`);
-                sections.push(`- ${issue.title || issue.description || 'No description'}`);
-                if (issue.wcag_criterion) {
-                    sections.push(`  - WCAG ${issue.wcag_criterion} (Level ${issue.wcag_level || 'A'})`);
-                }
-                sections.push('');
-            }
-        }
+        sections.push('');
     }
-    const suggestions = suggestionsAndNits.filter(i => i?.severity === 'SUGGESTION');
-    const nits = suggestionsAndNits.filter(i => i?.severity === 'NIT');
-    if (suggestions.length > 0) {
+    // Failed inline issues (CRITICAL/IMPORTANT without line numbers)
+    if (failedInlineCount > 0) {
+        sections.push('### ⚠️ Issues Without Line Numbers');
+        sections.push('');
+        for (const issue of critical) {
+            if (!issue.line || issue.line < 1) {
+                sections.push(`- **${issue.file || 'Unknown'}**: ${issue.title || issue.description || 'No description'}`);
+                if (issue.wcag_criterion) {
+                    sections.push(`  - WCAG ${issue.wcag_criterion} (Level ${issue.wcag_level || 'A'})`);
+                }
+            }
+        }
+        for (const issue of important) {
+            if (!issue.line || issue.line < 1) {
+                sections.push(`- **${issue.file || 'Unknown'}**: ${issue.title || issue.description || 'No description'}`);
+                if (issue.wcag_criterion) {
+                    sections.push(`  - WCAG ${issue.wcag_criterion} (Level ${issue.wcag_level || 'A'})`);
+                }
+            }
+        }
+        sections.push('');
+    }
+    // SUGGESTION details
+    if (totalSuggestions > 0) {
         sections.push('### 🟢 Suggestions');
         sections.push('');
         for (const issue of suggestions) {
@@ -31608,7 +31593,8 @@ function formatReviewBody(suggestionsAndNits, failedInlineIssues = []) {
             sections.push('');
         }
     }
-    if (nits.length > 0) {
+    // NIT details
+    if (totalNits > 0) {
         sections.push('### ⚪ Minor Issues');
         sections.push('');
         for (const issue of nits) {
@@ -31692,7 +31678,6 @@ exports.createOrUpdateComment = createOrUpdateComment;
 exports.formatIssueComment = formatIssueComment;
 exports.formatNoIssuesComment = formatNoIssuesComment;
 exports.formatDraftSkipComment = formatDraftSkipComment;
-exports.formatNoChangesComment = formatNoChangesComment;
 const types_1 = __nccwpck_require__(9520);
 const COMMENT_IDENTIFIER = '<!-- a11y-review -->';
 async function createOrUpdateComment(octokit, owner, repo, prNumber, body) {
@@ -31724,61 +31709,69 @@ async function createOrUpdateComment(octokit, owner, repo, prNumber, body) {
         return newComment.id;
     }
 }
-function formatIssueComment(allIssues, newIssues, summary) {
-    const sections = [];
-    const total = Math.min(allIssues.length, types_1.MAX_ISSUES);
-    const newCount = newIssues.length;
-    sections.push('## ♿ Accessibility Review', '');
-    if (summary) {
-        sections.push(`> ${summary}`, '');
-    }
-    const newLabel = newCount > 0 ? ` (${newCount} new since last analysis)` : '';
-    sections.push(`**Found ${total} issue${total === 1 ? '' : 's'}${newLabel}:**`, '');
-    // Apply MAX_ISSUES limit first, then filter by severity
-    const limitedIssues = allIssues.slice(0, types_1.MAX_ISSUES);
-    const critical = limitedIssues.filter(i => i.severity === 'CRITICAL');
-    const important = limitedIssues.filter(i => i.severity === 'IMPORTANT');
-    const suggestions = limitedIssues.filter(i => i.severity === 'SUGGESTION');
-    const nits = limitedIssues.filter(i => i.severity === 'NIT');
-    if (critical.length > 0) {
-        sections.push('### 🔴 Critical Issues', '');
-        for (const issue of critical) {
-            const isNew = newIssues.includes(issue);
-            sections.push(formatIssueItem(issue, isNew));
-        }
-    }
-    if (important.length > 0) {
-        sections.push('### 🟡 Important Issues', '');
-        for (const issue of important) {
-            const isNew = newIssues.includes(issue);
-            sections.push(formatIssueItem(issue, isNew));
-        }
-    }
-    if (suggestions.length > 0) {
-        sections.push('### 🟢 Suggestions', '');
-        for (const issue of suggestions) {
-            const isNew = newIssues.includes(issue);
-            sections.push(formatIssueItem(issue, isNew));
-        }
-    }
-    if (nits.length > 0) {
-        sections.push('### ⚪ Minor Improvements', '');
-        for (const issue of nits) {
-            const isNew = newIssues.includes(issue);
-            sections.push(formatIssueItem(issue, isNew));
-        }
-    }
+function formatIssueComment(issues) {
+    const limitedIssues = issues.slice(0, types_1.MAX_ISSUES);
+    const critical = limitedIssues.filter(i => i?.severity === 'CRITICAL');
+    const important = limitedIssues.filter(i => i?.severity === 'IMPORTANT');
+    const suggestions = limitedIssues.filter(i => i?.severity === 'SUGGESTION');
+    const nits = limitedIssues.filter(i => i?.severity === 'NIT');
+    const sections = ['## ♿ Accessibility Review', ''];
+    // Summary line
+    const total = limitedIssues.length;
+    const parts = [];
+    if (critical.length > 0)
+        parts.push(`🔴 ${critical.length} critical`);
+    if (important.length > 0)
+        parts.push(`🟡 ${important.length} important`);
+    if (suggestions.length > 0)
+        parts.push(`🟢 ${suggestions.length} suggestion${suggestions.length !== 1 ? 's' : ''}`);
+    if (nits.length > 0)
+        parts.push(`⚪ ${nits.length} nit${nits.length !== 1 ? 's' : ''}`);
+    sections.push(`**Found ${total} issue${total !== 1 ? 's' : ''}:** ${parts.join(', ')}`);
     sections.push('');
+    // CRITICAL issues (fallback for when not inline)
+    if (critical.length > 0) {
+        sections.push('### 🔴 Critical Issues');
+        sections.push('');
+        for (const issue of critical) {
+            sections.push(formatIssueItem(issue));
+        }
+    }
+    // IMPORTANT issues (fallback for when not inline)
+    if (important.length > 0) {
+        sections.push('### 🟡 Important Issues');
+        sections.push('');
+        for (const issue of important) {
+            sections.push(formatIssueItem(issue));
+        }
+    }
+    // SUGGESTIONS
+    if (suggestions.length > 0) {
+        sections.push('### 🟢 Suggestions');
+        sections.push('');
+        for (const issue of suggestions) {
+            sections.push(formatIssueItem(issue));
+        }
+    }
+    // NITS
+    if (nits.length > 0) {
+        sections.push('### ⚪ Minor Issues');
+        sections.push('');
+        for (const issue of nits) {
+            sections.push(formatIssueItem(issue));
+        }
+    }
     sections.push('---');
-    sections.push('*🤖 This review was automatically generated. Please verify all suggestions.*');
+    sections.push('*🤖 Generated by accessibility review*');
     return sections.join('\n');
 }
-function formatIssueItem(issue, isNew) {
+function formatIssueItem(issue) {
     const lines = [];
-    const newBadge = isNew ? ' ⚡ **NEW**' : '';
-    const location = issue.file + (issue.line ? `:${issue.line}` : '');
-    lines.push(`- **${location}**${newBadge} - ${issue.title || issue.description}`);
-    lines.push(`  - WCAG ${issue.wcag_criterion} (Level ${issue.wcag_level})`);
+    const location = (issue.file || 'Unknown') + (issue.line ? `:${issue.line}` : '');
+    lines.push(`- **${location}** - ${issue.title || issue.description || 'No description'}`);
+    if (issue.wcag_criterion) {
+        lines.push(`  - WCAG ${issue.wcag_criterion} (Level ${issue.wcag_level || 'A'})`);
+    }
     if (issue.suggestion) {
         lines.push(`  - **Fix:** ${issue.suggestion}`);
     }
@@ -31798,7 +31791,7 @@ function formatNoIssuesComment(summary) {
     lines.push('The changes appear to follow WCAG 2.1/2.2 guidelines.');
     lines.push('');
     lines.push('---');
-    lines.push('*🤖 This review was automatically generated.*');
+    lines.push('*🤖 Generated by accessibility review*');
     return lines.join('\n');
 }
 function formatDraftSkipComment() {
@@ -31810,17 +31803,7 @@ function formatDraftSkipComment() {
         'Accessibility analysis will run when the PR is marked as ready for review.',
         '',
         '---',
-        '*🤖 This review was automatically generated.*',
-    ].join('\n');
-}
-function formatNoChangesComment() {
-    return [
-        '## ♿ Accessibility Review',
-        '',
-        'No new accessibility-relevant changes since last analysis.',
-        '',
-        '---',
-        '*🤖 This review was automatically generated.*',
+        '*🤖 Generated by accessibility review*',
     ].join('\n');
 }
 
@@ -31872,14 +31855,9 @@ const batch_1 = __nccwpck_require__(251);
 const prompts_1 = __nccwpck_require__(831);
 const diff_parser_1 = __nccwpck_require__(5597);
 const types_1 = __nccwpck_require__(9520);
-const check_run_1 = __nccwpck_require__(2129);
 const client_1 = __nccwpck_require__(6584);
 const comments_1 = __nccwpck_require__(6645);
 async function run() {
-    let octokit;
-    let owner;
-    let repo;
-    let checkRunId = null;
     try {
         core.info('Starting accessibility review...');
         const token = core.getInput('github-token', { required: true });
@@ -31898,14 +31876,14 @@ async function run() {
             return;
         }
         const prNumber = context.payload.pull_request?.number;
-        owner = context.repo.owner;
-        repo = context.repo.repo;
+        const owner = context.repo.owner;
+        const repo = context.repo.repo;
         if (!prNumber) {
             core.setFailed('Could not determine PR number');
             return;
         }
         core.info(`Reviewing PR #${prNumber} in ${owner}/${repo}`);
-        octokit = github.getOctokit(token);
+        const octokit = github.getOctokit(token);
         const prInfo = await (0, client_1.getPRInfo)(octokit, owner, repo, prNumber);
         core.info(`PR is draft: ${prInfo.draft}, head SHA: ${prInfo.headSha}`);
         if (prInfo.draft) {
@@ -31914,122 +31892,83 @@ async function run() {
             core.setOutput('issues-found', '0');
             return;
         }
-        checkRunId = await (0, check_run_1.createCheckRun)(octokit, owner, repo, prInfo.headSha, prNumber);
-        const previousRun = await (0, check_run_1.getPreviousCheckRunForPR)(octokit, owner, repo, prNumber, prInfo.headSha);
-        if (previousRun) {
-            core.info(`Found previous run with ${Object.keys(previousRun.state.issuesByFile).length} files analyzed`);
+        // Get all PR files
+        const allFiles = await (0, client_1.getPRFiles)(octokit, owner, repo, prNumber);
+        core.info(`Fetched ${allFiles.length} files in PR`);
+        // Filter to accessibility-relevant files
+        const relevantFiles = allFiles.filter(f => f.patch && (0, diff_parser_1.isAccessibilityRelevant)(f.filename) && f.status !== 'removed');
+        core.info(`Found ${relevantFiles.length} accessibility-relevant files`);
+        if (relevantFiles.length === 0) {
+            core.info('No accessibility-relevant files found');
+            await (0, comments_1.createOrUpdateComment)(octokit, owner, repo, prNumber, (0, comments_1.formatNoIssuesComment)('No accessibility-relevant changes found.'));
+            core.setOutput('issues-found', '0');
+            return;
         }
-        else {
-            core.info('No previous run found, this is the first analysis');
-        }
+        // Analyze files
         const prompt = (0, prompts_1.buildPrompt)(owner, repo, prNumber);
-        let allIssues;
-        let newIssues;
-        if (!previousRun) {
-            core.info('First run: Analyzing all PR files');
-            const allFiles = await (0, client_1.getPRFiles)(octokit, owner, repo, prNumber);
-            core.info(`Fetched ${allFiles.length} total files in PR`);
-            const relevantFiles = allFiles.filter(f => f.patch && (0, diff_parser_1.isAccessibilityRelevant)(f.filename) && f.status !== 'removed');
-            core.info(`Found ${relevantFiles.length} accessibility-relevant files`);
-            if (relevantFiles.length === 0) {
-                core.info('No accessibility-relevant files found');
-                const state = (0, check_run_1.createEmptyState)(prNumber, prInfo.headSha);
-                await (0, check_run_1.finalizeCheckRun)(octokit, owner, repo, checkRunId, state, 0);
-                await (0, comments_1.createOrUpdateComment)(octokit, owner, repo, prNumber, (0, comments_1.formatNoIssuesComment)('No accessibility-relevant changes found.'));
-                core.setOutput('issues-found', '0');
-                return;
+        const result = await (0, batch_1.analyzeFilesInBatches)(relevantFiles, llmBackend, apiKey, model, ollamaUrl, prompt);
+        const issues = result.issues.slice(0, types_1.MAX_ISSUES);
+        core.info(`Found ${issues.length} issues`);
+        // Separate issues by severity
+        const criticalAndImportant = issues.filter(i => i.severity === 'CRITICAL' || i.severity === 'IMPORTANT');
+        const suggestionsAndNits = issues.filter(i => i.severity === 'SUGGESTION' || i.severity === 'NIT');
+        // Build file patches map
+        const filePatches = new Map();
+        for (const file of relevantFiles) {
+            if (file.filename && file.patch) {
+                filePatches.set(file.filename, file.patch);
             }
-            const result = await (0, batch_1.analyzeFilesInBatches)(relevantFiles, llmBackend, apiKey, model, ollamaUrl, prompt);
-            allIssues = result.issues;
-            newIssues = result.issues;
-            const issuesByFile = (0, types_1.groupIssuesByFile)(allIssues.slice(0, types_1.MAX_ISSUES));
-            const state = {
-                version: 1,
-                lastAnalyzedHeadSha: prInfo.headSha,
-                prNumber,
-                issuesByFile,
-            };
-            await postResults(octokit, owner, repo, prNumber, prInfo.headSha, allIssues, newIssues, relevantFiles, checkRunId, state);
+        }
+        // Post results
+        if (criticalAndImportant.length > 0) {
+            core.info(`Posting ${criticalAndImportant.length} CRITICAL/IMPORTANT issues as inline comments`);
+            try {
+                const reviewResult = await (0, client_1.createReview)(octokit, owner, repo, prNumber, prInfo.headSha, criticalAndImportant, suggestionsAndNits, filePatches);
+                core.info(`Posted ${reviewResult.postedInlineCount} inline comments, ${reviewResult.failedInlineIssues.length} in body`);
+            }
+            catch (error) {
+                core.warning(`Failed to create review: ${error instanceof Error ? error.message : String(error)}`);
+                // Fallback to PR comment
+                const comment = (0, comments_1.formatIssueComment)(issues);
+                await (0, comments_1.createOrUpdateComment)(octokit, owner, repo, prNumber, comment);
+            }
+        }
+        else if (issues.length > 0) {
+            core.info('Posting SUGGESTION/NIT issues as PR comment');
+            const comment = (0, comments_1.formatIssueComment)(issues);
+            await (0, comments_1.createOrUpdateComment)(octokit, owner, repo, prNumber, comment);
         }
         else {
-            core.info('Incremental run: Checking for new commits');
-            const changedFiles = await (0, client_1.getFilesChangedBetween)(octokit, owner, repo, previousRun.state.lastAnalyzedHeadSha, prInfo.headSha);
-            core.info(`Found ${changedFiles.size} files changed since last analysis`);
-            if (changedFiles.size === 0) {
-                core.info('No new commits since last analysis');
-                const existingIssues = (0, types_1.flattenIssues)(previousRun.state.issuesByFile);
-                await (0, check_run_1.finalizeCheckRun)(octokit, owner, repo, checkRunId, previousRun.state, 0);
-                if (existingIssues.length > 0) {
-                    await (0, comments_1.createOrUpdateComment)(octokit, owner, repo, prNumber, (0, comments_1.formatIssueComment)(existingIssues, [], 'No new changes since last analysis.'));
-                }
-                else {
-                    await (0, comments_1.createOrUpdateComment)(octokit, owner, repo, prNumber, (0, comments_1.formatNoChangesComment)());
-                }
-                core.setOutput('issues-found', String(existingIssues.length));
-                if (existingIssues.length > 0 && failOnIssues) {
-                    core.setFailed(`Found ${existingIssues.length} accessibility issue${existingIssues.length === 1 ? '' : 's'} from previous analysis`);
-                }
-                return;
-            }
-            const allPRFiles = await (0, client_1.getPRFiles)(octokit, owner, repo, prNumber);
-            const relevantChangedFiles = allPRFiles.filter(f => changedFiles.has(f.filename) && f.patch && (0, diff_parser_1.isAccessibilityRelevant)(f.filename) && f.status !== 'removed');
-            core.info(`Found ${relevantChangedFiles.length} relevant files to re-analyze`);
-            if (relevantChangedFiles.length === 0) {
-                core.info('No accessibility-relevant changes in new commits');
-                const existingIssues = (0, types_1.flattenIssues)(previousRun.state.issuesByFile);
-                const state = {
-                    ...previousRun.state,
-                    lastAnalyzedHeadSha: prInfo.headSha,
-                };
-                await (0, check_run_1.finalizeCheckRun)(octokit, owner, repo, checkRunId, state, 0);
-                if (existingIssues.length > 0) {
-                    await (0, comments_1.createOrUpdateComment)(octokit, owner, repo, prNumber, (0, comments_1.formatIssueComment)(existingIssues, [], 'No accessibility-relevant changes in recent commits.'));
-                }
-                else {
-                    await (0, comments_1.createOrUpdateComment)(octokit, owner, repo, prNumber, (0, comments_1.formatNoChangesComment)());
-                }
-                core.setOutput('issues-found', String(existingIssues.length));
-                if (existingIssues.length > 0 && failOnIssues) {
-                    core.setFailed(`Found ${existingIssues.length} accessibility issue${existingIssues.length === 1 ? '' : 's'} from previous analysis`);
-                }
-                return;
-            }
-            const result = await (0, batch_1.analyzeFilesInBatches)(relevantChangedFiles, llmBackend, apiKey, model, ollamaUrl, prompt);
-            newIssues = result.issues;
-            const existingIssues = [];
-            for (const [file, issues] of Object.entries(previousRun.state.issuesByFile)) {
-                if (!changedFiles.has(file)) {
-                    existingIssues.push(...issues);
-                }
-            }
-            allIssues = [...existingIssues, ...newIssues].slice(0, types_1.MAX_ISSUES);
-            const state = (0, check_run_1.updateStateWithNewIssues)(previousRun.state, (0, types_1.groupIssuesByFile)(newIssues), changedFiles, prInfo.headSha);
-            await postResults(octokit, owner, repo, prNumber, prInfo.headSha, allIssues, newIssues, relevantChangedFiles, checkRunId, state);
+            core.info('No issues found');
+            await (0, comments_1.createOrUpdateComment)(octokit, owner, repo, prNumber, (0, comments_1.formatNoIssuesComment)());
         }
-        const totalIssues = Math.min(allIssues.length, types_1.MAX_ISSUES);
-        const criticalAndImportantCount = allIssues.filter(i => i.severity === 'CRITICAL' || i.severity === 'IMPORTANT').length;
-        const suggestionAndNitCount = totalIssues - criticalAndImportantCount;
-        core.setOutput('issues-found', String(totalIssues));
-        core.info(`Total issues: ${totalIssues} (${criticalAndImportantCount} critical/important, ${suggestionAndNitCount} suggestions/nits)`);
-        // Only fail on CRITICAL and IMPORTANT issues, not on SUGGESTION/NIT
-        if (criticalAndImportantCount > 0 && failOnIssues) {
-            const criticalCount = allIssues.filter(i => i.severity === 'CRITICAL').length;
-            const importantCount = allIssues.filter(i => i.severity === 'IMPORTANT').length;
-            let message = `Found ${criticalAndImportantCount} blocking issue${criticalAndImportantCount === 1 ? '' : 's'}`;
+        // Set output
+        core.setOutput('issues-found', String(issues.length));
+        // Fail on CRITICAL/IMPORTANT
+        if (criticalAndImportant.length > 0 && failOnIssues) {
+            const criticalCount = issues.filter(i => i.severity === 'CRITICAL').length;
+            const importantCount = issues.filter(i => i.severity === 'IMPORTANT').length;
+            const suggestionCount = issues.filter(i => i.severity === 'SUGGESTION').length;
+            const nitCount = issues.filter(i => i.severity === 'NIT').length;
+            const parts = [];
             if (criticalCount > 0)
-                message += ` (${criticalCount} critical`;
+                parts.push(`${criticalCount} critical`);
             if (importantCount > 0)
-                message += `${criticalCount > 0 ? ', ' : '('}${importantCount} important)`;
-            if (suggestionAndNitCount > 0) {
-                message += `. Plus ${suggestionAndNitCount} suggestion${suggestionAndNitCount === 1 ? '' : 's'}.`;
+                parts.push(`${importantCount} important`);
+            let message = `Found ${criticalAndImportant.length} blocking issue${criticalAndImportant.length !== 1 ? 's' : ''}`;
+            if (parts.length > 0) {
+                message += ` (${parts.join(', ')})`;
+            }
+            if (suggestionCount > 0 || nitCount > 0) {
+                message += `. Plus ${suggestionCount + nitCount} non-blocking suggestion${(suggestionCount + nitCount) !== 1 ? 's' : ''}.`;
             }
             core.setFailed(message);
             return;
         }
-        if (suggestionAndNitCount > 0) {
-            core.info(`✓ No blocking issues. ${suggestionAndNitCount} suggestion${suggestionAndNitCount === 1 ? '' : 's'} available for review.`);
+        if (suggestionsAndNits.length > 0) {
+            core.info(`✓ No blocking issues. ${suggestionsAndNits.length} suggestion${suggestionsAndNits.length !== 1 ? 's' : ''} available for review.`);
         }
-        else {
+        else if (issues.length === 0) {
             core.info('✓ Review complete - no issues found');
         }
     }
@@ -32039,49 +31978,6 @@ async function run() {
         if (error instanceof Error && error.stack) {
             core.debug(`Stack trace: ${error.stack}`);
         }
-    }
-}
-async function postResults(octokit, owner, repo, prNumber, headSha, allIssues, newIssues, filesAnalyzed, checkRunId, state) {
-    const criticalAndImportant = newIssues.filter(i => i.severity === 'CRITICAL' || i.severity === 'IMPORTANT');
-    const suggestionsAndNits = newIssues.filter(i => i.severity === 'SUGGESTION' || i.severity === 'NIT');
-    const filePatches = new Map();
-    for (const file of filesAnalyzed) {
-        if (file.filename && file.patch) {
-            filePatches.set(file.filename, file.patch);
-        }
-    }
-    let postedSuccessfully = false;
-    if (criticalAndImportant.length > 0) {
-        core.info(`Creating review with ${criticalAndImportant.length} CRITICAL/IMPORTANT issues`);
-        try {
-            const result = await (0, client_1.createReview)(octokit, owner, repo, prNumber, headSha, criticalAndImportant, suggestionsAndNits, filePatches);
-            core.info(`Posted ${result.postedInlineCount} inline comments, ${result.failedInlineIssues.length} issues in body`);
-            postedSuccessfully = true;
-        }
-        catch (error) {
-            core.warning(`Failed to create review: ${error instanceof Error ? error.message : String(error)}`);
-        }
-    }
-    if (!postedSuccessfully) {
-        try {
-            if (allIssues.length > 0) {
-                core.info('Falling back to PR comment');
-                const comment = (0, comments_1.formatIssueComment)(allIssues, newIssues);
-                await (0, comments_1.createOrUpdateComment)(octokit, owner, repo, prNumber, comment);
-            }
-            else {
-                await (0, comments_1.createOrUpdateComment)(octokit, owner, repo, prNumber, (0, comments_1.formatNoIssuesComment)());
-            }
-        }
-        catch (error) {
-            core.warning(`Failed to create PR comment: ${error instanceof Error ? error.message : String(error)}`);
-        }
-    }
-    try {
-        await (0, check_run_1.finalizeCheckRun)(octokit, owner, repo, checkRunId, state, newIssues.length);
-    }
-    catch (error) {
-        core.warning(`Failed to finalize check run: ${error instanceof Error ? error.message : String(error)}`);
     }
 }
 run();
@@ -32618,223 +32514,6 @@ Object.defineProperty(exports, "getSystemPrompt", ({ enumerable: true, get: func
 
 /***/ }),
 
-/***/ 2129:
-/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
-
-"use strict";
-
-var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    var desc = Object.getOwnPropertyDescriptor(m, k);
-    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
-      desc = { enumerable: true, get: function() { return m[k]; } };
-    }
-    Object.defineProperty(o, k2, desc);
-}) : (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    o[k2] = m[k];
-}));
-var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
-    Object.defineProperty(o, "default", { enumerable: true, value: v });
-}) : function(o, v) {
-    o["default"] = v;
-});
-var __importStar = (this && this.__importStar) || (function () {
-    var ownKeys = function(o) {
-        ownKeys = Object.getOwnPropertyNames || function (o) {
-            var ar = [];
-            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
-            return ar;
-        };
-        return ownKeys(o);
-    };
-    return function (mod) {
-        if (mod && mod.__esModule) return mod;
-        var result = {};
-        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
-        __setModuleDefault(result, mod);
-        return result;
-    };
-})();
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.createCheckRun = createCheckRun;
-exports.getPreviousCheckRunForPR = getPreviousCheckRunForPR;
-exports.updateCheckRun = updateCheckRun;
-exports.finalizeCheckRun = finalizeCheckRun;
-exports.serializeState = serializeState;
-exports.deserializeState = deserializeState;
-exports.createEmptyState = createEmptyState;
-exports.updateStateWithNewIssues = updateStateWithNewIssues;
-const core = __importStar(__nccwpck_require__(7484));
-const types_1 = __nccwpck_require__(9520);
-const CHECK_RUN_TITLE = 'Accessibility Review';
-const STATE_VERSION = 1;
-async function createCheckRun(octokit, owner, repo, headSha, prNumber) {
-    const checkRunName = (0, types_1.getCheckRunName)(prNumber);
-    const { data: checkRun } = await octokit.rest.checks.create({
-        owner,
-        repo,
-        name: checkRunName,
-        head_sha: headSha,
-        status: 'in_progress',
-        started_at: new Date().toISOString(),
-        output: {
-            title: CHECK_RUN_TITLE,
-            summary: 'Accessibility review in progress...',
-            text: '',
-        },
-    });
-    core.info(`Created check run ${checkRun.id}`);
-    return checkRun.id;
-}
-async function getPreviousCheckRunForPR(octokit, owner, repo, prNumber, headSha) {
-    const checkRunName = (0, types_1.getCheckRunName)(prNumber);
-    try {
-        // First try to find check run on current head SHA
-        const checkRuns = await octokit.rest.checks.listForRef({
-            owner,
-            repo,
-            ref: headSha,
-            per_page: 100,
-        });
-        let matchingRun = checkRuns.data.check_runs
-            .filter(run => run.name === checkRunName && run.status === 'completed')
-            .sort((a, b) => new Date(b.completed_at || 0).getTime() - new Date(a.completed_at || 0).getTime())[0];
-        // If not found on current SHA, we need to look at the PR's commit history
-        if (!matchingRun) {
-            core.info('No check run found on current SHA, searching in PR history...');
-            // List commits in the PR
-            const { data: commits } = await octokit.rest.pulls.listCommits({
-                owner,
-                repo,
-                pull_number: prNumber,
-                per_page: 100,
-            });
-            // Search for check runs on previous commits (starting from most recent)
-            // Don't reverse - we want to start from the newest commit
-            for (const commit of commits) {
-                // Skip the current head SHA (we already checked it above)
-                if (commit.sha === headSha)
-                    continue;
-                try {
-                    const refCheckRuns = await octokit.rest.checks.listForRef({
-                        owner,
-                        repo,
-                        ref: commit.sha,
-                        per_page: 100,
-                    });
-                    const run = refCheckRuns.data.check_runs
-                        .filter(r => r.name === checkRunName && r.status === 'completed')
-                        .sort((a, b) => new Date(b.completed_at || 0).getTime() - new Date(a.completed_at || 0).getTime())[0];
-                    if (run) {
-                        matchingRun = run;
-                        core.info(`Found previous check run on commit ${commit.sha}`);
-                        break;
-                    }
-                }
-                catch {
-                    // Continue to next commit if this one fails
-                }
-            }
-        }
-        if (!matchingRun) {
-            core.info('No previous check run found');
-            return null;
-        }
-        if (!matchingRun.output?.text) {
-            core.info('Previous check run has no state');
-            return null;
-        }
-        const state = deserializeState(matchingRun.output.text);
-        if (state.version !== STATE_VERSION) {
-            core.info('State version mismatch, treating as first run');
-            return null;
-        }
-        core.info(`Found previous check run ${matchingRun.id} with SHA ${state.lastAnalyzedHeadSha}`);
-        return {
-            checkRunId: matchingRun.id,
-            state,
-        };
-    }
-    catch (error) {
-        core.warning(`Failed to get previous check run for PR: ${error}`);
-        return null;
-    }
-}
-async function updateCheckRun(octokit, owner, repo, checkRunId, conclusion, state, summary) {
-    const stateJson = serializeState(state);
-    await octokit.rest.checks.update({
-        owner,
-        repo,
-        check_run_id: checkRunId,
-        status: 'completed',
-        conclusion,
-        completed_at: new Date().toISOString(),
-        output: {
-            title: CHECK_RUN_TITLE,
-            summary,
-            text: stateJson,
-        },
-    });
-    core.info(`Updated check run ${checkRunId} with conclusion: ${conclusion}`);
-}
-async function finalizeCheckRun(octokit, owner, repo, checkRunId, state, newIssueCount) {
-    const totalIssues = (0, types_1.flattenIssues)(state.issuesByFile).length;
-    const conclusion = totalIssues > 0 ? 'failure' : 'success';
-    const summary = totalIssues > 0
-        ? `Found ${totalIssues} accessibility issue${totalIssues === 1 ? '' : 's'}${newIssueCount > 0 ? ` (${newIssueCount} new)` : ''}`
-        : 'No accessibility issues found';
-    await updateCheckRun(octokit, owner, repo, checkRunId, conclusion, state, summary);
-}
-function serializeState(state) {
-    return JSON.stringify(state);
-}
-function deserializeState(json) {
-    try {
-        const parsed = JSON.parse(json);
-        if (parsed.version !== STATE_VERSION) {
-            return createEmptyState(0, '');
-        }
-        return {
-            version: parsed.version || STATE_VERSION,
-            lastAnalyzedHeadSha: parsed.lastAnalyzedHeadSha || '',
-            prNumber: parsed.prNumber || 0,
-            issuesByFile: parsed.issuesByFile || {},
-        };
-    }
-    catch {
-        return createEmptyState(0, '');
-    }
-}
-function createEmptyState(prNumber, headSha) {
-    return {
-        version: STATE_VERSION,
-        lastAnalyzedHeadSha: headSha,
-        prNumber,
-        issuesByFile: {},
-    };
-}
-function updateStateWithNewIssues(previousState, newIssuesByFile, filesReanalyzed, newHeadSha) {
-    const newIssuesByFileCopy = { ...previousState.issuesByFile };
-    // Remove issues for files that were re-analyzed
-    for (const file of filesReanalyzed) {
-        delete newIssuesByFileCopy[file];
-    }
-    // Add new/updated issues
-    for (const [file, issues] of Object.entries(newIssuesByFile)) {
-        newIssuesByFileCopy[file] = issues;
-    }
-    return {
-        version: STATE_VERSION,
-        lastAnalyzedHeadSha: newHeadSha,
-        prNumber: previousState.prNumber,
-        issuesByFile: newIssuesByFileCopy,
-    };
-}
-
-
-/***/ }),
-
 /***/ 9520:
 /***/ ((__unused_webpack_module, exports) => {
 
@@ -32842,35 +32521,6 @@ function updateStateWithNewIssues(previousState, newIssuesByFile, filesReanalyze
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.BATCH_SIZE = exports.MAX_ISSUES = void 0;
-exports.getCheckRunName = getCheckRunName;
-exports.hashIssue = hashIssue;
-exports.groupIssuesByFile = groupIssuesByFile;
-exports.flattenIssues = flattenIssues;
-const CHECK_RUN_NAME_PREFIX = 'Accessibility Review';
-function getCheckRunName(prNumber) {
-    return `${CHECK_RUN_NAME_PREFIX} (PR #${prNumber})`;
-}
-function hashIssue(issue) {
-    const title = issue.title || issue.description || '';
-    return `${issue.file}:${issue.wcag_criterion}:${title}`;
-}
-function groupIssuesByFile(issues) {
-    const grouped = {};
-    for (const issue of issues) {
-        if (!grouped[issue.file]) {
-            grouped[issue.file] = [];
-        }
-        grouped[issue.file].push(issue);
-    }
-    return grouped;
-}
-function flattenIssues(issuesByFile) {
-    const allIssues = [];
-    for (const issues of Object.values(issuesByFile)) {
-        allIssues.push(...issues);
-    }
-    return allIssues;
-}
 exports.MAX_ISSUES = 100;
 exports.BATCH_SIZE = 20;
 

@@ -1,9 +1,4 @@
-// Analyze ALL files - no filtering based on file type
-// Accessibility issues can exist in any file type, not just frontend code
-export function isAccessibilityRelevant(_filename: string): boolean {
-  return true;
-}
-
+// Format file diffs for LLM analysis - extracts only added lines from patches
 export function formatDiffForAnalysis(files: Array<{ filename: string; patch?: string }>): string {
   const lines: string[] = [];
 

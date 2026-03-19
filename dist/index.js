@@ -31853,7 +31853,6 @@ const core = __importStar(__nccwpck_require__(7484));
 const github = __importStar(__nccwpck_require__(3228));
 const batch_1 = __nccwpck_require__(251);
 const prompts_1 = __nccwpck_require__(831);
-const diff_parser_1 = __nccwpck_require__(5597);
 const types_1 = __nccwpck_require__(9520);
 const client_1 = __nccwpck_require__(6584);
 const comments_1 = __nccwpck_require__(6645);
@@ -31892,21 +31891,21 @@ async function run() {
             core.setOutput('issues-found', '0');
             return;
         }
-        // Get all PR files
+        // Get all PR files (analyze ALL changed files)
         const allFiles = await (0, client_1.getPRFiles)(octokit, owner, repo, prNumber);
         core.info(`Fetched ${allFiles.length} files in PR`);
-        // Filter to accessibility-relevant files
-        const relevantFiles = allFiles.filter(f => f.patch && (0, diff_parser_1.isAccessibilityRelevant)(f.filename) && f.status !== 'removed');
-        core.info(`Found ${relevantFiles.length} accessibility-relevant files`);
-        if (relevantFiles.length === 0) {
-            core.info('No accessibility-relevant files found');
-            await (0, comments_1.createOrUpdateComment)(octokit, owner, repo, prNumber, (0, comments_1.formatNoIssuesComment)('No accessibility-relevant changes found.'));
+        // Filter out removed files (can't analyze deleted content)
+        const filesToAnalyze = allFiles.filter(f => f.status !== 'removed' && f.patch);
+        core.info(`Analyzing ${filesToAnalyze.length} files with changes`);
+        if (filesToAnalyze.length === 0) {
+            core.info('No files with changes found');
+            await (0, comments_1.createOrUpdateComment)(octokit, owner, repo, prNumber, (0, comments_1.formatNoIssuesComment)('No files with changes to analyze.'));
             core.setOutput('issues-found', '0');
             return;
         }
         // Analyze files
         const prompt = (0, prompts_1.buildPrompt)(owner, repo, prNumber);
-        const result = await (0, batch_1.analyzeFilesInBatches)(relevantFiles, llmBackend, apiKey, model, ollamaUrl, prompt);
+        const result = await (0, batch_1.analyzeFilesInBatches)(filesToAnalyze, llmBackend, apiKey, model, ollamaUrl, prompt);
         const issues = result.issues.slice(0, types_1.MAX_ISSUES);
         core.info(`Found ${issues.length} issues`);
         // Separate issues by severity
@@ -31914,7 +31913,7 @@ async function run() {
         const suggestionsAndNits = issues.filter(i => i.severity === 'SUGGESTION' || i.severity === 'NIT');
         // Build file patches map
         const filePatches = new Map();
-        for (const file of relevantFiles) {
+        for (const file of filesToAnalyze) {
             if (file.filename && file.patch) {
                 filePatches.set(file.filename, file.patch);
             }
@@ -32240,13 +32239,8 @@ exports.OllamaClient = OllamaClient;
 "use strict";
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.isAccessibilityRelevant = isAccessibilityRelevant;
 exports.formatDiffForAnalysis = formatDiffForAnalysis;
-// Analyze ALL files - no filtering based on file type
-// Accessibility issues can exist in any file type, not just frontend code
-function isAccessibilityRelevant(_filename) {
-    return true;
-}
+// Format file diffs for LLM analysis - extracts only added lines from patches
 function formatDiffForAnalysis(files) {
     const lines = [];
     for (const file of files) {

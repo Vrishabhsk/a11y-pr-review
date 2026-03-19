@@ -2,8 +2,7 @@ import * as core from '@actions/core';
 import * as github from '@actions/github';
 import { analyzeFilesInBatches } from './llm/batch';
 import { buildPrompt } from './prompts';
-import { isAccessibilityRelevant } from './parsers/diff-parser';
-import { A11yIssue, FilePatch, MAX_ISSUES } from './state/types';
+import { A11yIssue, MAX_ISSUES } from './state/types';
 import { getPRInfo, getPRFiles, createReview } from './github/client';
 import { createOrUpdateComment, formatIssueComment, formatNoIssuesComment, formatDraftSkipComment } from './github/comments';
 
@@ -54,19 +53,17 @@ async function run(): Promise<void> {
       return;
     }
 
-    // Get all PR files
+    // Get all PR files (analyze ALL changed files)
     const allFiles = await getPRFiles(octokit, owner, repo, prNumber);
     core.info(`Fetched ${allFiles.length} files in PR`);
 
-    // Filter to accessibility-relevant files
-    const relevantFiles = allFiles.filter(
-      f => f.patch && isAccessibilityRelevant(f.filename) && f.status !== 'removed'
-    );
-    core.info(`Found ${relevantFiles.length} accessibility-relevant files`);
+    // Filter out removed files (can't analyze deleted content)
+    const filesToAnalyze = allFiles.filter(f => f.status !== 'removed' && f.patch);
+    core.info(`Analyzing ${filesToAnalyze.length} files with changes`);
 
-    if (relevantFiles.length === 0) {
-      core.info('No accessibility-relevant files found');
-      await createOrUpdateComment(octokit, owner, repo, prNumber, formatNoIssuesComment('No accessibility-relevant changes found.'));
+    if (filesToAnalyze.length === 0) {
+      core.info('No files with changes found');
+      await createOrUpdateComment(octokit, owner, repo, prNumber, formatNoIssuesComment('No files with changes to analyze.'));
       core.setOutput('issues-found', '0');
       return;
     }
@@ -74,7 +71,7 @@ async function run(): Promise<void> {
     // Analyze files
     const prompt = buildPrompt(owner, repo, prNumber);
     const result = await analyzeFilesInBatches(
-      relevantFiles,
+      filesToAnalyze,
       llmBackend,
       apiKey,
       model,
@@ -95,7 +92,7 @@ async function run(): Promise<void> {
 
     // Build file patches map
     const filePatches = new Map<string, string>();
-    for (const file of relevantFiles) {
+    for (const file of filesToAnalyze) {
       if (file.filename && file.patch) {
         filePatches.set(file.filename, file.patch);
       }

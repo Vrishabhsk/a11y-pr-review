@@ -30,7 +30,7 @@ async function run(): Promise<void> {
       core.warning('Using Ollama Cloud without api-key. Set OLLAMA_API_KEY env var or provide api-key input.');
     }
 
-    // Warn if using local Ollama without a running server
+    // Info log when API key provided for local Ollama
     if (llmBackend === 'ollama' && !ollamaUrl.includes('ollama.com') && apiKey) {
       core.info('API key provided for local Ollama - will use for authentication if required');
     }
@@ -94,12 +94,10 @@ async function run(): Promise<void> {
     core.info(`Found ${issues.length} issues`);
 
     // Separate issues by severity
-    const criticalAndImportant = issues.filter(
-      i => i.severity === 'CRITICAL' || i.severity === 'IMPORTANT'
-    );
-    const suggestionsAndNits = issues.filter(
-      i => i.severity === 'SUGGESTION' || i.severity === 'NIT'
-    );
+    const violations = issues.filter(i => i.severity === 'VIOLATION');
+    const goodPractices = issues.filter(i => i.severity === 'GOOD_PRACTICE');
+
+    core.info(`Violations: ${violations.length}, Good Practices: ${goodPractices.length}`);
 
     // Build file patches map
     const filePatches = new Map<string, string>();
@@ -110,8 +108,8 @@ async function run(): Promise<void> {
     }
 
     // Post results
-    if (criticalAndImportant.length > 0) {
-      core.info(`Posting ${criticalAndImportant.length} CRITICAL/IMPORTANT issues as inline comments`);
+    if (violations.length > 0) {
+      core.info(`Posting ${violations.length} VIOLATION issues as inline comments`);
       
       try {
         const reviewResult = await createReview(
@@ -120,12 +118,12 @@ async function run(): Promise<void> {
           repo,
           prNumber,
           prInfo.headSha,
-          criticalAndImportant,
-          suggestionsAndNits,
+          violations,
+          goodPractices,
           filePatches
         );
         
-        core.info(`Posted ${reviewResult.postedInlineCount} inline comments, ${reviewResult.failedInlineIssues.length} in body`);
+        core.info(`Posted ${reviewResult.postedInlineCount} inline comments`);
       } catch (error) {
         core.warning(`Failed to create review: ${error instanceof Error ? error.message : String(error)}`);
         // Fallback to PR comment
@@ -133,7 +131,8 @@ async function run(): Promise<void> {
         await createOrUpdateComment(octokit, owner, repo, prNumber, comment);
       }
     } else if (issues.length > 0) {
-      core.info('Posting SUGGESTION/NIT issues as PR comment');
+      // Only good practices - post as comment
+      core.info('Only GOOD_PRACTICE issues found, posting as PR comment');
       const comment = formatIssueComment(issues);
       await createOrUpdateComment(octokit, owner, repo, prNumber, comment);
     } else {
@@ -143,33 +142,17 @@ async function run(): Promise<void> {
 
     // Set output
     core.setOutput('issues-found', String(issues.length));
+    core.setOutput('violations', String(violations.length));
+    core.setOutput('good-practices', String(goodPractices.length));
 
-    // Fail on CRITICAL/IMPORTANT
-    if (criticalAndImportant.length > 0 && failOnIssues) {
-      const criticalCount = issues.filter(i => i.severity === 'CRITICAL').length;
-      const importantCount = issues.filter(i => i.severity === 'IMPORTANT').length;
-      const suggestionCount = issues.filter(i => i.severity === 'SUGGESTION').length;
-      const nitCount = issues.filter(i => i.severity === 'NIT').length;
-
-      const parts: string[] = [];
-      if (criticalCount > 0) parts.push(`${criticalCount} critical`);
-      if (importantCount > 0) parts.push(`${importantCount} important`);
-      
-      let message = `Found ${criticalAndImportant.length} blocking issue${criticalAndImportant.length !== 1 ? 's' : ''}`;
-      if (parts.length > 0) {
-        message += ` (${parts.join(', ')})`;
-      }
-      
-      if (suggestionCount > 0 || nitCount > 0) {
-        message += `. Plus ${suggestionCount + nitCount} non-blocking suggestion${(suggestionCount + nitCount) !== 1 ? 's' : ''}.`;
-      }
-
-      core.setFailed(message);
+    // Fail only on VIOLATION issues (GOOD_PRACTICE is not mandatory)
+    if (violations.length > 0 && failOnIssues) {
+      core.setFailed(`Found ${violations.length} WCAG 2.2 violation${violations.length !== 1 ? 's' : ''} that must be fixed.`);
       return;
     }
 
-    if (suggestionsAndNits.length > 0) {
-      core.info(`✓ No blocking issues. ${suggestionsAndNits.length} suggestion${suggestionsAndNits.length !== 1 ? 's' : ''} available for review.`);
+    if (goodPractices.length > 0) {
+      core.info(`✓ No violations. ${goodPractices.length} good practice${goodPractices.length !== 1 ? 's' : ''} available for review.`);
     } else if (issues.length === 0) {
       core.info('✓ Review complete - no issues found');
     }

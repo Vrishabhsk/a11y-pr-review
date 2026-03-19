@@ -1,15 +1,5 @@
 import { GoogleGenerativeAI, SchemaType } from '@google/generative-ai';
-
-interface A11yIssue {
-  file: string;
-  line: number | null;
-  wcag_criterion: string;
-  wcag_level: string;
-  severity: 'CRITICAL' | 'IMPORTANT' | 'SUGGESTION' | 'NIT';
-  title: string;
-  description: string;
-  suggestion: string;
-}
+import { A11yIssue } from '../state/types';
 
 interface AnalysisResult {
   issues: A11yIssue[];
@@ -69,11 +59,8 @@ export class GeminiClient {
       const parsed = JSON.parse(text);
       
       const issues: A11yIssue[] = (parsed.issues || []).map((issue: Record<string, unknown>) => {
-        const rawSeverity = String(issue.severity || 'suggestion').toUpperCase();
-        const severity: A11yIssue['severity'] = 
-          rawSeverity === 'CRITICAL' ? 'CRITICAL' :
-          rawSeverity === 'IMPORTANT' ? 'IMPORTANT' :
-          rawSeverity === 'NIT' ? 'NIT' : 'SUGGESTION';
+        const rawSeverity = String(issue.severity || 'GOOD_PRACTICE').toUpperCase();
+        const severity: A11yIssue['severity'] = rawSeverity === 'VIOLATION' ? 'VIOLATION' : 'GOOD_PRACTICE';
         
         return {
           file: String(issue.file || ''),

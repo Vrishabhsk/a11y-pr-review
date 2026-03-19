@@ -3,7 +3,7 @@ export interface A11yIssue {
     line: number | null;
     wcag_criterion: string;
     wcag_level: string;
-    severity: 'CRITICAL' | 'IMPORTANT' | 'SUGGESTION' | 'NIT';
+    severity: 'VIOLATION' | 'GOOD_PRACTICE';
     title: string;
     description: string;
     suggestion: string;

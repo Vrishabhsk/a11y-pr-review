@@ -1,6 +1,7 @@
 import * as core from '@actions/core';
 import * as github from '@actions/github';
-import { A11yIssue, FilePatch, PRInfo } from '../state/types';
+import { A11yIssue, FilePatch, MAX_ISSUES } from '../state/types';
+import { formatDiffForAnalysis } from '../parsers/diff-parser';
 
 type Octokit = ReturnType<typeof github.getOctokit>;
 
@@ -9,7 +10,13 @@ export async function getPRInfo(
   owner: string,
   repo: string,
   prNumber: number
-): Promise<PRInfo> {
+): Promise<{
+  number: number;
+  draft: boolean;
+  headSha: string;
+  baseSha: string;
+  title?: string;
+}> {
   const { data: pr } = await octokit.rest.pulls.get({
     owner,
     repo,
@@ -62,43 +69,93 @@ export async function getPRFiles(
   return files;
 }
 
+interface LinePosition {
+  originalLine: number;  // Line number in the original file
+  newLine: number;       // Line number in the new file (for GitHub API)
+}
+
+function parsePatchForLinePositions(patch: string): Map<number, number> {
+  // Returns map of NEW file line number -> position in diff (for GitHub API)
+  const lines = patch.split('\n');
+  const lineMap = new Map<number, number>();
+  
+  let newLineNum = 0;
+  let inHunk = false;
+  let position = 0;
+
+  for (const line of lines) {
+    const hunkMatch = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+    
+    if (hunkMatch) {
+      newLineNum = parseInt(hunkMatch[1], 10);
+      inHunk = true;
+      position++;
+      continue;
+    }
+
+    if (!inHunk) continue;
+
+    position++;  // Position for GitHub API (all lines in hunk)
+
+    if (line.startsWith('+')) {
+      // Added line - this is the new line number
+      lineMap.set(newLineNum, position);
+      newLineNum++;
+    } else if (line.startsWith('-')) {
+      // Deleted line - skip
+    } else if (line.startsWith(' ')) {
+      // Context line
+      newLineNum++;
+    } else if (!line.startsWith('\\')) {
+      // Other content
+      newLineNum++;
+    }
+  }
+
+  return lineMap;
+}
+
 export async function createReview(
   octokit: Octokit,
   owner: string,
   repo: string,
   prNumber: number,
   headSha: string,
-  criticalAndImportant: A11yIssue[],
-  suggestionsAndNits: A11yIssue[],
+  violations: A11yIssue[],
+  goodPractices: A11yIssue[],
   filePatches: Map<string, string>
-): Promise<{ reviewId: number; postedInlineCount: number; failedInlineIssues: A11yIssue[] }> {
+): Promise<{ reviewId: number; postedInlineCount: number }> {
   const comments: Array<{
     path: string;
     line: number;
     body: string;
   }> = [];
 
-  const failedInlineIssues: A11yIssue[] = [];
+  // Get PR diffs to find correct line positions
+  const { data: prFiles } = await octokit.rest.pulls.listFiles({
+    owner,
+    repo,
+    pull_number: prNumber,
+    per_page: 100,
+  });
 
-  for (const issue of criticalAndImportant) {
-    if (!issue) continue;
-    
-    if (!issue.line || issue.line < 1 || !issue.file) {
-      failedInlineIssues.push(issue);
-      continue;
+  // Build line position maps for each file
+  const fileLineMaps = new Map<string, Map<number, number>>();
+  for (const file of prFiles) {
+    if (file.patch) {
+      fileLineMaps.set(file.filename, parsePatchForLinePositions(file.patch));
     }
+  }
 
-    const patch = filePatches.get(issue.file);
-    if (!patch) {
-      failedInlineIssues.push(issue);
-      continue;
-    }
+  // Create inline comments ONLY for violations
+  for (const issue of violations) {
+    if (!issue || !issue.line || issue.line < 1 || !issue.file) continue;
 
-    const position = findLineInPatch(patch, issue.line);
-    if (position === null) {
-      failedInlineIssues.push(issue);
-      continue;
-    }
+    const lineMap = fileLineMaps.get(issue.file);
+    if (!lineMap) continue;
+
+    const position = lineMap.get(issue.line);
+    if (position === undefined) continue;
 
     comments.push({
       path: issue.file,
@@ -107,14 +164,15 @@ export async function createReview(
     });
   }
 
-  const body = formatReviewBody(criticalAndImportant, suggestionsAndNits, comments.length, failedInlineIssues.length);
+  // Build review body with violation count and good practice details
+  const body = formatReviewBody(violations, goodPractices);
 
   const { data: review } = await octokit.rest.pulls.createReview({
     owner,
     repo,
     pull_number: prNumber,
     commit_id: headSha,
-    event: 'COMMENT',
+    event: comments.length > 0 ? 'REQUEST_CHANGES' : 'COMMENT',
     body,
     comments: comments.map(c => ({
       path: c.path,
@@ -124,164 +182,86 @@ export async function createReview(
   });
 
   core.info(`Created review with ${comments.length} inline comments`);
-  return { reviewId: review.id, postedInlineCount: comments.length, failedInlineIssues };
+  return { reviewId: review.id, postedInlineCount: comments.length };
 }
 
-function formatReviewBody(
-  criticalAndImportant: A11yIssue[],
-  suggestionsAndNits: A11yIssue[],
-  postedInlineCount: number,
-  failedInlineCount: number
-): string {
-  const critical = criticalAndImportant.filter(i => i?.severity === 'CRITICAL');
-  const important = criticalAndImportant.filter(i => i?.severity === 'IMPORTANT');
-  const suggestions = suggestionsAndNits.filter(i => i?.severity === 'SUGGESTION');
-  const nits = suggestionsAndNits.filter(i => i?.severity === 'NIT');
-
-  const totalCritical = critical.length;
-  const totalImportant = important.length;
-  const totalSuggestions = suggestions.length;
-  const totalNits = nits.length;
-  const totalIssues = totalCritical + totalImportant + totalSuggestions + totalNits;
-
-  if (totalIssues === 0) {
-    return '## ♿ Accessibility Review\n\n✅ No issues found.';
-  }
-
+function formatReviewBody(violations: A11yIssue[], goodPractices: A11yIssue[]): string {
   const sections: string[] = ['## ♿ Accessibility Review', ''];
 
   // Summary line
-  const parts: string[] = [];
-  if (totalCritical > 0) parts.push(`🔴 ${totalCritical} critical`);
-  if (totalImportant > 0) parts.push(`🟡 ${totalImportant} important`);
-  if (totalSuggestions > 0) parts.push(`🟢 ${totalSuggestions} suggestion${totalSuggestions !== 1 ? 's' : ''}`);
-  if (totalNits > 0) parts.push(`⚪ ${totalNits} nit${totalNits !== 1 ? 's' : ''}`);
-
-  const inlinePosted = postedInlineCount + failedInlineCount;
-  if (inlinePosted > 0) {
-    sections.push(`**Found ${totalIssues} issue${totalIssues !== 1 ? 's' : ''}:** ${parts.join(', ')}`);
-    if (postedInlineCount > 0) {
-      sections.push(`\n*${postedInlineCount} critical/important issue${postedInlineCount !== 1 ? 's' : ''} posted as inline comments above.*`);
-    }
+  if (violations.length === 0 && goodPractices.length === 0) {
+    sections.push('✅ **No issues found.**');
     sections.push('');
-  }
-
-  // Failed inline issues (CRITICAL/IMPORTANT without line numbers)
-  if (failedInlineCount > 0) {
-    sections.push('### ⚠️ Issues Without Line Numbers');
-    sections.push('');
+    sections.push('The code appears to follow WCAG 2.2 guidelines.');
+  } else {
+    const parts: string[] = [];
+    if (violations.length > 0) parts.push(`🔴 **${violations.length} violation${violations.length !== 1 ? 's' : ''}**`);
+    if (goodPractices.length > 0) parts.push(`🟢 **${goodPractices.length} good practice${goodPractices.length !== 1 ? 's' : ''}**`);
     
-    for (const issue of critical) {
-      if (!issue.line || issue.line < 1) {
-        sections.push(`- **${issue.file || 'Unknown'}**: ${issue.title || issue.description || 'No description'}`);
-        if (issue.wcag_criterion) {
-          sections.push(`  - WCAG ${issue.wcag_criterion} (Level ${issue.wcag_level || 'A'})`);
-        }
-      }
-    }
-    
-    for (const issue of important) {
-      if (!issue.line || issue.line < 1) {
-        sections.push(`- **${issue.file || 'Unknown'}**: ${issue.title || issue.description || 'No description'}`);
-        if (issue.wcag_criterion) {
-          sections.push(`  - WCAG ${issue.wcag_criterion} (Level ${issue.wcag_level || 'A'})`);
-        }
-      }
-    }
+    sections.push(`**Found:** ${parts.join(' · ')}`);
     sections.push('');
-  }
 
-  // SUGGESTION details
-  if (totalSuggestions > 0) {
-    sections.push('### 🟢 Suggestions');
-    sections.push('');
-    for (const issue of suggestions) {
-      if (!issue) continue;
-      const location = (issue.file || 'Unknown') + (issue.line ? `:${issue.line}` : '');
-      sections.push(`**${location}**`);
-      sections.push(`${issue.title || issue.description || 'No description'}`);
-      if (issue.suggestion) {
-        sections.push(`\`\`\`${issue.suggestion}\`\`\``);
-      }
+    if (violations.length > 0) {
+      sections.push('---');
+      sections.push('');
+      sections.push('### ⚠️ Violations');
+      sections.push('');
+      sections.push('These issues **must be fixed** to meet WCAG 2.2 requirements.');
+      sections.push('');
+      sections.push(`See the **${violations.length} inline comment${violations.length !== 1 ? 's' : ''}** above for details.`);
       sections.push('');
     }
-  }
 
-  // NIT details
-  if (totalNits > 0) {
-    sections.push('### ⚪ Minor Issues');
-    sections.push('');
-    for (const issue of nits) {
-      if (!issue) continue;
-      const location = (issue.file || 'Unknown') + (issue.line ? `:${issue.line}` : '');
-      sections.push(`- ${location}: ${issue.title || issue.description || 'No description'}`);
+    if (goodPractices.length > 0) {
+      sections.push('---');
+      sections.push('');
+      sections.push('### 🟢 Good Practices');
+      sections.push('');
+      sections.push('These are **recommended improvements** that enhance accessibility but are not required.');
+      sections.push('');
+
+      for (const issue of goodPractices) {
+        if (!issue) continue;
+        const location = (issue.file || 'Unknown') + (issue.line ? `:${issue.line}` : '');
+        sections.push(`**${location}**`);
+        sections.push(`> ${issue.title || 'Accessibility improvement'}`);
+        if (issue.wcag_criterion) {
+          sections.push(`> WCAG ${issue.wcag_criterion} (Level ${issue.wcag_level || 'A'})`);
+        }
+        if (issue.description) {
+          sections.push(`> ${issue.description}`);
+        }
+        if (issue.suggestion) {
+          sections.push('>');
+          sections.push(`> \`\`\`${issue.suggestion}\`\`\``);
+        }
+        sections.push('');
+      }
     }
-    sections.push('');
   }
 
   sections.push('---');
-  sections.push('*🤖 Generated by accessibility review*');
+  sections.push('*🤖 Generated by WCAG 2.2 Accessibility Review*');
 
   return sections.join('\n');
 }
 
 function formatInlineComment(issue: A11yIssue): string {
-  if (!issue) {
-    return '🔴 **Unknown Issue**\n\nUnable to format issue details.';
-  }
-  
-  const emoji = issue.severity === 'CRITICAL' ? '🔴' : '🟡';
   const lines: string[] = [
-    `${emoji} **${issue.title || 'Accessibility Issue'}**`,
+    `🔴 **${issue.title || 'Accessibility Violation'}**`,
     '',
     `**WCAG ${issue.wcag_criterion || 'Unknown'}** (Level ${issue.wcag_level || 'A'})`,
     '',
-    issue.description || 'No description available',
+    issue.description || 'This code does not meet WCAG 2.2 requirements.',
   ];
 
   if (issue.suggestion) {
-    lines.push('', '**Fix:**', '```suggestion', issue.suggestion, '```');
+    lines.push('');
+    lines.push('**Suggested fix:**');
+    lines.push('```suggestion');
+    lines.push(issue.suggestion);
+    lines.push('```');
   }
 
   return lines.join('\n');
-}
-
-function findLineInPatch(patch: string, targetLine: number): number | null {
-  const lines = patch.split('\n');
-  let currentNewLine = 0;
-
-  const hunkHeaderRegex = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
-  let inHunk = false;
-
-  for (const line of lines) {
-    const match = line.match(hunkHeaderRegex);
-    if (match) {
-      currentNewLine = parseInt(match[1], 10);
-      inHunk = true;
-      continue;
-    }
-
-    if (!inHunk) continue;
-
-    if (line.startsWith('+')) {
-      if (currentNewLine === targetLine) {
-        return currentNewLine;
-      }
-      currentNewLine++;
-    } else if (line.startsWith('-')) {
-      // Deleted line, don't increment
-    } else if (line.startsWith(' ')) {
-      if (currentNewLine === targetLine) {
-        return currentNewLine;
-      }
-      currentNewLine++;
-    } else if (!line.startsWith('\\')) {
-      if (currentNewLine === targetLine) {
-        return currentNewLine;
-      }
-      currentNewLine++;
-    }
-  }
-
-  return null;
 }

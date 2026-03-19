@@ -1,13 +1,4 @@
-interface A11yIssue {
-    file: string;
-    line: number | null;
-    wcag_criterion: string;
-    wcag_level: string;
-    severity: 'CRITICAL' | 'IMPORTANT' | 'SUGGESTION' | 'NIT';
-    title: string;
-    description: string;
-    suggestion: string;
-}
+import { A11yIssue } from '../state/types';
 interface AnalysisResult {
     issues: A11yIssue[];
     summary: string;

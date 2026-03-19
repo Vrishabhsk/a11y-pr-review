@@ -32143,39 +32143,83 @@ async function getPRFiles(octokit, owner, repo, prNumber) {
     }
     return files;
 }
-async function createReview(octokit, owner, repo, prNumber, headSha, criticalAndImportant, suggestionsAndNits, filePatches) {
+function parsePatchForLinePositions(patch) {
+    // Returns map of NEW file line number -> position in diff (for GitHub API)
+    const lines = patch.split('\n');
+    const lineMap = new Map();
+    let newLineNum = 0;
+    let inHunk = false;
+    let position = 0;
+    for (const line of lines) {
+        const hunkMatch = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+        if (hunkMatch) {
+            newLineNum = parseInt(hunkMatch[1], 10);
+            inHunk = true;
+            position++;
+            continue;
+        }
+        if (!inHunk)
+            continue;
+        position++; // Position for GitHub API (all lines in hunk)
+        if (line.startsWith('+')) {
+            // Added line - this is the new line number
+            lineMap.set(newLineNum, position);
+            newLineNum++;
+        }
+        else if (line.startsWith('-')) {
+            // Deleted line - skip
+        }
+        else if (line.startsWith(' ')) {
+            // Context line
+            newLineNum++;
+        }
+        else if (!line.startsWith('\\')) {
+            // Other content
+            newLineNum++;
+        }
+    }
+    return lineMap;
+}
+async function createReview(octokit, owner, repo, prNumber, headSha, violations, goodPractices, filePatches) {
     const comments = [];
-    const failedInlineIssues = [];
-    for (const issue of criticalAndImportant) {
-        if (!issue)
-            continue;
-        if (!issue.line || issue.line < 1 || !issue.file) {
-            failedInlineIssues.push(issue);
-            continue;
+    // Get PR diffs to find correct line positions
+    const { data: prFiles } = await octokit.rest.pulls.listFiles({
+        owner,
+        repo,
+        pull_number: prNumber,
+        per_page: 100,
+    });
+    // Build line position maps for each file
+    const fileLineMaps = new Map();
+    for (const file of prFiles) {
+        if (file.patch) {
+            fileLineMaps.set(file.filename, parsePatchForLinePositions(file.patch));
         }
-        const patch = filePatches.get(issue.file);
-        if (!patch) {
-            failedInlineIssues.push(issue);
+    }
+    // Create inline comments ONLY for violations
+    for (const issue of violations) {
+        if (!issue || !issue.line || issue.line < 1 || !issue.file)
             continue;
-        }
-        const position = findLineInPatch(patch, issue.line);
-        if (position === null) {
-            failedInlineIssues.push(issue);
+        const lineMap = fileLineMaps.get(issue.file);
+        if (!lineMap)
             continue;
-        }
+        const position = lineMap.get(issue.line);
+        if (position === undefined)
+            continue;
         comments.push({
             path: issue.file,
             line: position,
             body: formatInlineComment(issue),
         });
     }
-    const body = formatReviewBody(criticalAndImportant, suggestionsAndNits, comments.length, failedInlineIssues.length);
+    // Build review body with violation count and good practice details
+    const body = formatReviewBody(violations, goodPractices);
     const { data: review } = await octokit.rest.pulls.createReview({
         owner,
         repo,
         pull_number: prNumber,
         commit_id: headSha,
-        event: 'COMMENT',
+        event: comments.length > 0 ? 'REQUEST_CHANGES' : 'COMMENT',
         body,
         comments: comments.map(c => ({
             path: c.path,
@@ -32184,148 +32228,81 @@ async function createReview(octokit, owner, repo, prNumber, headSha, criticalAnd
         })),
     });
     core.info(`Created review with ${comments.length} inline comments`);
-    return { reviewId: review.id, postedInlineCount: comments.length, failedInlineIssues };
+    return { reviewId: review.id, postedInlineCount: comments.length };
 }
-function formatReviewBody(criticalAndImportant, suggestionsAndNits, postedInlineCount, failedInlineCount) {
-    const critical = criticalAndImportant.filter(i => i?.severity === 'CRITICAL');
-    const important = criticalAndImportant.filter(i => i?.severity === 'IMPORTANT');
-    const suggestions = suggestionsAndNits.filter(i => i?.severity === 'SUGGESTION');
-    const nits = suggestionsAndNits.filter(i => i?.severity === 'NIT');
-    const totalCritical = critical.length;
-    const totalImportant = important.length;
-    const totalSuggestions = suggestions.length;
-    const totalNits = nits.length;
-    const totalIssues = totalCritical + totalImportant + totalSuggestions + totalNits;
-    if (totalIssues === 0) {
-        return '## ♿ Accessibility Review\n\n✅ No issues found.';
-    }
+function formatReviewBody(violations, goodPractices) {
     const sections = ['## ♿ Accessibility Review', ''];
     // Summary line
-    const parts = [];
-    if (totalCritical > 0)
-        parts.push(`🔴 ${totalCritical} critical`);
-    if (totalImportant > 0)
-        parts.push(`🟡 ${totalImportant} important`);
-    if (totalSuggestions > 0)
-        parts.push(`🟢 ${totalSuggestions} suggestion${totalSuggestions !== 1 ? 's' : ''}`);
-    if (totalNits > 0)
-        parts.push(`⚪ ${totalNits} nit${totalNits !== 1 ? 's' : ''}`);
-    const inlinePosted = postedInlineCount + failedInlineCount;
-    if (inlinePosted > 0) {
-        sections.push(`**Found ${totalIssues} issue${totalIssues !== 1 ? 's' : ''}:** ${parts.join(', ')}`);
-        if (postedInlineCount > 0) {
-            sections.push(`\n*${postedInlineCount} critical/important issue${postedInlineCount !== 1 ? 's' : ''} posted as inline comments above.*`);
-        }
+    if (violations.length === 0 && goodPractices.length === 0) {
+        sections.push('✅ **No issues found.**');
         sections.push('');
+        sections.push('The code appears to follow WCAG 2.2 guidelines.');
     }
-    // Failed inline issues (CRITICAL/IMPORTANT without line numbers)
-    if (failedInlineCount > 0) {
-        sections.push('### ⚠️ Issues Without Line Numbers');
+    else {
+        const parts = [];
+        if (violations.length > 0)
+            parts.push(`🔴 **${violations.length} violation${violations.length !== 1 ? 's' : ''}**`);
+        if (goodPractices.length > 0)
+            parts.push(`🟢 **${goodPractices.length} good practice${goodPractices.length !== 1 ? 's' : ''}**`);
+        sections.push(`**Found:** ${parts.join(' · ')}`);
         sections.push('');
-        for (const issue of critical) {
-            if (!issue.line || issue.line < 1) {
-                sections.push(`- **${issue.file || 'Unknown'}**: ${issue.title || issue.description || 'No description'}`);
-                if (issue.wcag_criterion) {
-                    sections.push(`  - WCAG ${issue.wcag_criterion} (Level ${issue.wcag_level || 'A'})`);
-                }
-            }
-        }
-        for (const issue of important) {
-            if (!issue.line || issue.line < 1) {
-                sections.push(`- **${issue.file || 'Unknown'}**: ${issue.title || issue.description || 'No description'}`);
-                if (issue.wcag_criterion) {
-                    sections.push(`  - WCAG ${issue.wcag_criterion} (Level ${issue.wcag_level || 'A'})`);
-                }
-            }
-        }
-        sections.push('');
-    }
-    // SUGGESTION details
-    if (totalSuggestions > 0) {
-        sections.push('### 🟢 Suggestions');
-        sections.push('');
-        for (const issue of suggestions) {
-            if (!issue)
-                continue;
-            const location = (issue.file || 'Unknown') + (issue.line ? `:${issue.line}` : '');
-            sections.push(`**${location}**`);
-            sections.push(`${issue.title || issue.description || 'No description'}`);
-            if (issue.suggestion) {
-                sections.push(`\`\`\`${issue.suggestion}\`\`\``);
-            }
+        if (violations.length > 0) {
+            sections.push('---');
+            sections.push('');
+            sections.push('### ⚠️ Violations');
+            sections.push('');
+            sections.push('These issues **must be fixed** to meet WCAG 2.2 requirements.');
+            sections.push('');
+            sections.push(`See the **${violations.length} inline comment${violations.length !== 1 ? 's' : ''}** above for details.`);
             sections.push('');
         }
-    }
-    // NIT details
-    if (totalNits > 0) {
-        sections.push('### ⚪ Minor Issues');
-        sections.push('');
-        for (const issue of nits) {
-            if (!issue)
-                continue;
-            const location = (issue.file || 'Unknown') + (issue.line ? `:${issue.line}` : '');
-            sections.push(`- ${location}: ${issue.title || issue.description || 'No description'}`);
+        if (goodPractices.length > 0) {
+            sections.push('---');
+            sections.push('');
+            sections.push('### 🟢 Good Practices');
+            sections.push('');
+            sections.push('These are **recommended improvements** that enhance accessibility but are not required.');
+            sections.push('');
+            for (const issue of goodPractices) {
+                if (!issue)
+                    continue;
+                const location = (issue.file || 'Unknown') + (issue.line ? `:${issue.line}` : '');
+                sections.push(`**${location}**`);
+                sections.push(`> ${issue.title || 'Accessibility improvement'}`);
+                if (issue.wcag_criterion) {
+                    sections.push(`> WCAG ${issue.wcag_criterion} (Level ${issue.wcag_level || 'A'})`);
+                }
+                if (issue.description) {
+                    sections.push(`> ${issue.description}`);
+                }
+                if (issue.suggestion) {
+                    sections.push('>');
+                    sections.push(`> \`\`\`${issue.suggestion}\`\`\``);
+                }
+                sections.push('');
+            }
         }
-        sections.push('');
     }
     sections.push('---');
-    sections.push('*🤖 Generated by accessibility review*');
+    sections.push('*🤖 Generated by WCAG 2.2 Accessibility Review*');
     return sections.join('\n');
 }
 function formatInlineComment(issue) {
-    if (!issue) {
-        return '🔴 **Unknown Issue**\n\nUnable to format issue details.';
-    }
-    const emoji = issue.severity === 'CRITICAL' ? '🔴' : '🟡';
     const lines = [
-        `${emoji} **${issue.title || 'Accessibility Issue'}**`,
+        `🔴 **${issue.title || 'Accessibility Violation'}**`,
         '',
         `**WCAG ${issue.wcag_criterion || 'Unknown'}** (Level ${issue.wcag_level || 'A'})`,
         '',
-        issue.description || 'No description available',
+        issue.description || 'This code does not meet WCAG 2.2 requirements.',
     ];
     if (issue.suggestion) {
-        lines.push('', '**Fix:**', '```suggestion', issue.suggestion, '```');
+        lines.push('');
+        lines.push('**Suggested fix:**');
+        lines.push('```suggestion');
+        lines.push(issue.suggestion);
+        lines.push('```');
     }
     return lines.join('\n');
-}
-function findLineInPatch(patch, targetLine) {
-    const lines = patch.split('\n');
-    let currentNewLine = 0;
-    const hunkHeaderRegex = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
-    let inHunk = false;
-    for (const line of lines) {
-        const match = line.match(hunkHeaderRegex);
-        if (match) {
-            currentNewLine = parseInt(match[1], 10);
-            inHunk = true;
-            continue;
-        }
-        if (!inHunk)
-            continue;
-        if (line.startsWith('+')) {
-            if (currentNewLine === targetLine) {
-                return currentNewLine;
-            }
-            currentNewLine++;
-        }
-        else if (line.startsWith('-')) {
-            // Deleted line, don't increment
-        }
-        else if (line.startsWith(' ')) {
-            if (currentNewLine === targetLine) {
-                return currentNewLine;
-            }
-            currentNewLine++;
-        }
-        else if (!line.startsWith('\\')) {
-            if (currentNewLine === targetLine) {
-                return currentNewLine;
-            }
-            currentNewLine++;
-        }
-    }
-    return null;
 }
 
 
@@ -32374,69 +32351,64 @@ async function createOrUpdateComment(octokit, owner, repo, prNumber, body) {
 }
 function formatIssueComment(issues) {
     const limitedIssues = issues.slice(0, types_1.MAX_ISSUES);
-    const critical = limitedIssues.filter(i => i?.severity === 'CRITICAL');
-    const important = limitedIssues.filter(i => i?.severity === 'IMPORTANT');
-    const suggestions = limitedIssues.filter(i => i?.severity === 'SUGGESTION');
-    const nits = limitedIssues.filter(i => i?.severity === 'NIT');
+    const violations = limitedIssues.filter(i => i?.severity === 'VIOLATION');
+    const goodPractices = limitedIssues.filter(i => i?.severity === 'GOOD_PRACTICE');
     const sections = ['## ♿ Accessibility Review', ''];
     // Summary line
-    const total = limitedIssues.length;
-    const parts = [];
-    if (critical.length > 0)
-        parts.push(`🔴 ${critical.length} critical`);
-    if (important.length > 0)
-        parts.push(`🟡 ${important.length} important`);
-    if (suggestions.length > 0)
-        parts.push(`🟢 ${suggestions.length} suggestion${suggestions.length !== 1 ? 's' : ''}`);
-    if (nits.length > 0)
-        parts.push(`⚪ ${nits.length} nit${nits.length !== 1 ? 's' : ''}`);
-    sections.push(`**Found ${total} issue${total !== 1 ? 's' : ''}:** ${parts.join(', ')}`);
-    sections.push('');
-    // CRITICAL issues (fallback for when not inline)
-    if (critical.length > 0) {
-        sections.push('### 🔴 Critical Issues');
+    if (violations.length === 0 && goodPractices.length === 0) {
+        sections.push('✅ **No issues found.**');
         sections.push('');
-        for (const issue of critical) {
-            sections.push(formatIssueItem(issue));
-        }
+        sections.push('The code appears to follow WCAG 2.2 guidelines.');
     }
-    // IMPORTANT issues (fallback for when not inline)
-    if (important.length > 0) {
-        sections.push('### 🟡 Important Issues');
+    else {
+        const parts = [];
+        if (violations.length > 0)
+            parts.push(`🔴 **${violations.length} violation${violations.length !== 1 ? 's' : ''}**`);
+        if (goodPractices.length > 0)
+            parts.push(`🟢 **${goodPractices.length} good practice${goodPractices.length !== 1 ? 's' : ''}**`);
+        sections.push(`**Found:** ${parts.join(' · ')}`);
         sections.push('');
-        for (const issue of important) {
-            sections.push(formatIssueItem(issue));
+        if (violations.length > 0) {
+            sections.push('---');
+            sections.push('');
+            sections.push('### ⚠️ Violations');
+            sections.push('');
+            sections.push('These issues **must be fixed** to meet WCAG 2.2 requirements.');
+            sections.push('');
+            for (const issue of violations) {
+                sections.push(formatIssueItem(issue));
+            }
         }
-    }
-    // SUGGESTIONS
-    if (suggestions.length > 0) {
-        sections.push('### 🟢 Suggestions');
-        sections.push('');
-        for (const issue of suggestions) {
-            sections.push(formatIssueItem(issue));
-        }
-    }
-    // NITS
-    if (nits.length > 0) {
-        sections.push('### ⚪ Minor Issues');
-        sections.push('');
-        for (const issue of nits) {
-            sections.push(formatIssueItem(issue));
+        if (goodPractices.length > 0) {
+            sections.push('---');
+            sections.push('');
+            sections.push('### 🟢 Good Practices');
+            sections.push('');
+            sections.push('These are **recommended improvements** that enhance accessibility but are not required.');
+            sections.push('');
+            for (const issue of goodPractices) {
+                sections.push(formatIssueItem(issue));
+            }
         }
     }
     sections.push('---');
-    sections.push('*🤖 Generated by accessibility review*');
+    sections.push('*🤖 Generated by WCAG 2.2 Accessibility Review*');
     return sections.join('\n');
 }
 function formatIssueItem(issue) {
     const lines = [];
     const location = (issue.file || 'Unknown') + (issue.line ? `:${issue.line}` : '');
-    lines.push(`- **${location}** - ${issue.title || issue.description || 'No description'}`);
+    lines.push(`**${location}**`);
+    lines.push(`> ${issue.title || 'Accessibility issue'}`);
     if (issue.wcag_criterion) {
-        lines.push(`  - WCAG ${issue.wcag_criterion} (Level ${issue.wcag_level || 'A'})`);
+        lines.push(`> WCAG ${issue.wcag_criterion} (Level ${issue.wcag_level || 'A'})`);
+    }
+    if (issue.description) {
+        lines.push(`> ${issue.description}`);
     }
     if (issue.suggestion) {
-        lines.push(`  - **Fix:** ${issue.suggestion}`);
+        lines.push('>');
+        lines.push(`> \`\`\`${issue.suggestion}\`\`\``);
     }
     lines.push('');
     return lines.join('\n');
@@ -32449,12 +32421,12 @@ function formatNoIssuesComment(summary) {
     if (summary) {
         lines.push(`> ${summary}`, '');
     }
-    lines.push('No accessibility issues were found.');
+    lines.push('**No issues found.**');
     lines.push('');
-    lines.push('The changes appear to follow WCAG 2.1/2.2 guidelines.');
+    lines.push('The code appears to follow WCAG 2.2 guidelines.');
     lines.push('');
     lines.push('---');
-    lines.push('*🤖 Generated by accessibility review*');
+    lines.push('*🤖 Generated by WCAG 2.2 Accessibility Review*');
     return lines.join('\n');
 }
 function formatDraftSkipComment() {
@@ -32466,7 +32438,7 @@ function formatDraftSkipComment() {
         'Accessibility analysis will run when the PR is marked as ready for review.',
         '',
         '---',
-        '*🤖 Generated by accessibility review*',
+        '*🤖 Generated by WCAG 2.2 Accessibility Review*',
     ].join('\n');
 }
 
@@ -32537,7 +32509,7 @@ async function run() {
         if (llmBackend === 'ollama' && ollamaUrl.includes('ollama.com') && !apiKey) {
             core.warning('Using Ollama Cloud without api-key. Set OLLAMA_API_KEY env var or provide api-key input.');
         }
-        // Warn if using local Ollama without a running server
+        // Info log when API key provided for local Ollama
         if (llmBackend === 'ollama' && !ollamaUrl.includes('ollama.com') && apiKey) {
             core.info('API key provided for local Ollama - will use for authentication if required');
         }
@@ -32581,8 +32553,9 @@ async function run() {
         const issues = result.issues.slice(0, types_1.MAX_ISSUES);
         core.info(`Found ${issues.length} issues`);
         // Separate issues by severity
-        const criticalAndImportant = issues.filter(i => i.severity === 'CRITICAL' || i.severity === 'IMPORTANT');
-        const suggestionsAndNits = issues.filter(i => i.severity === 'SUGGESTION' || i.severity === 'NIT');
+        const violations = issues.filter(i => i.severity === 'VIOLATION');
+        const goodPractices = issues.filter(i => i.severity === 'GOOD_PRACTICE');
+        core.info(`Violations: ${violations.length}, Good Practices: ${goodPractices.length}`);
         // Build file patches map
         const filePatches = new Map();
         for (const file of filesToAnalyze) {
@@ -32591,11 +32564,11 @@ async function run() {
             }
         }
         // Post results
-        if (criticalAndImportant.length > 0) {
-            core.info(`Posting ${criticalAndImportant.length} CRITICAL/IMPORTANT issues as inline comments`);
+        if (violations.length > 0) {
+            core.info(`Posting ${violations.length} VIOLATION issues as inline comments`);
             try {
-                const reviewResult = await (0, client_1.createReview)(octokit, owner, repo, prNumber, prInfo.headSha, criticalAndImportant, suggestionsAndNits, filePatches);
-                core.info(`Posted ${reviewResult.postedInlineCount} inline comments, ${reviewResult.failedInlineIssues.length} in body`);
+                const reviewResult = await (0, client_1.createReview)(octokit, owner, repo, prNumber, prInfo.headSha, violations, goodPractices, filePatches);
+                core.info(`Posted ${reviewResult.postedInlineCount} inline comments`);
             }
             catch (error) {
                 core.warning(`Failed to create review: ${error instanceof Error ? error.message : String(error)}`);
@@ -32605,7 +32578,8 @@ async function run() {
             }
         }
         else if (issues.length > 0) {
-            core.info('Posting SUGGESTION/NIT issues as PR comment');
+            // Only good practices - post as comment
+            core.info('Only GOOD_PRACTICE issues found, posting as PR comment');
             const comment = (0, comments_1.formatIssueComment)(issues);
             await (0, comments_1.createOrUpdateComment)(octokit, owner, repo, prNumber, comment);
         }
@@ -32615,29 +32589,15 @@ async function run() {
         }
         // Set output
         core.setOutput('issues-found', String(issues.length));
-        // Fail on CRITICAL/IMPORTANT
-        if (criticalAndImportant.length > 0 && failOnIssues) {
-            const criticalCount = issues.filter(i => i.severity === 'CRITICAL').length;
-            const importantCount = issues.filter(i => i.severity === 'IMPORTANT').length;
-            const suggestionCount = issues.filter(i => i.severity === 'SUGGESTION').length;
-            const nitCount = issues.filter(i => i.severity === 'NIT').length;
-            const parts = [];
-            if (criticalCount > 0)
-                parts.push(`${criticalCount} critical`);
-            if (importantCount > 0)
-                parts.push(`${importantCount} important`);
-            let message = `Found ${criticalAndImportant.length} blocking issue${criticalAndImportant.length !== 1 ? 's' : ''}`;
-            if (parts.length > 0) {
-                message += ` (${parts.join(', ')})`;
-            }
-            if (suggestionCount > 0 || nitCount > 0) {
-                message += `. Plus ${suggestionCount + nitCount} non-blocking suggestion${(suggestionCount + nitCount) !== 1 ? 's' : ''}.`;
-            }
-            core.setFailed(message);
+        core.setOutput('violations', String(violations.length));
+        core.setOutput('good-practices', String(goodPractices.length));
+        // Fail only on VIOLATION issues (GOOD_PRACTICE is not mandatory)
+        if (violations.length > 0 && failOnIssues) {
+            core.setFailed(`Found ${violations.length} WCAG 2.2 violation${violations.length !== 1 ? 's' : ''} that must be fixed.`);
             return;
         }
-        if (suggestionsAndNits.length > 0) {
-            core.info(`✓ No blocking issues. ${suggestionsAndNits.length} suggestion${suggestionsAndNits.length !== 1 ? 's' : ''} available for review.`);
+        if (goodPractices.length > 0) {
+            core.info(`✓ No violations. ${goodPractices.length} good practice${goodPractices.length !== 1 ? 's' : ''} available for review.`);
         }
         else if (issues.length === 0) {
             core.info('✓ Review complete - no issues found');
@@ -32696,28 +32656,38 @@ var __importStar = (this && this.__importStar) || (function () {
 })();
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.analyzeFilesInBatches = analyzeFilesInBatches;
-const core = __importStar(__nccwpck_require__(7484));
-const gemini_client_1 = __nccwpck_require__(1942);
-const ollama_client_1 = __nccwpck_require__(6849);
 const types_1 = __nccwpck_require__(9520);
-const diff_parser_1 = __nccwpck_require__(5597);
 async function analyzeFilesInBatches(files, llmBackend, apiKey, model, ollamaUrl, prompt) {
+    const BATCH_SIZE = 20;
     const allIssues = [];
     const batches = [];
-    for (let i = 0; i < files.length; i += types_1.BATCH_SIZE) {
-        batches.push(files.slice(i, i + types_1.BATCH_SIZE));
+    for (let i = 0; i < files.length; i += BATCH_SIZE) {
+        batches.push(files.slice(i, i + BATCH_SIZE));
     }
-    core.info(`Analyzing ${files.length} files in ${batches.length} batch(es)`);
+    const { GeminiClient } = await Promise.resolve().then(() => __importStar(__nccwpck_require__(1942)));
+    const { OllamaClient } = await Promise.resolve().then(() => __importStar(__nccwpck_require__(6849)));
     const client = llmBackend === 'gemini'
-        ? new gemini_client_1.GeminiClient(apiKey || '', model)
-        : new ollama_client_1.OllamaClient(ollamaUrl, model, apiKey);
+        ? new GeminiClient(apiKey || '', model)
+        : new OllamaClient(ollamaUrl, model, apiKey);
     for (let i = 0; i < batches.length; i++) {
         const batch = batches[i];
         const batchNum = i + 1;
-        core.info(`Analyzing batch ${batchNum}/${batches.length} (${batch.length} files)`);
-        const diffContent = (0, diff_parser_1.formatDiffForAnalysis)(batch);
+        console.log(`Analyzing batch ${batchNum}/${batches.length} (${batch.length} files)`);
+        const diffLines = [];
+        for (const file of batch) {
+            if (!file.patch)
+                continue;
+            diffLines.push(`=== ${file.filename} ===`);
+            for (const line of file.patch.split('\n')) {
+                if (line.startsWith('+') && !line.startsWith('+++')) {
+                    diffLines.push(line.substring(1));
+                }
+            }
+            diffLines.push('');
+        }
+        const diffContent = diffLines.join('\n');
         if (!diffContent.trim()) {
-            core.info(`Batch ${batchNum} has no relevant content, skipping`);
+            console.log(`Batch ${batchNum} has no content, skipping`);
             continue;
         }
         try {
@@ -32725,17 +32695,18 @@ async function analyzeFilesInBatches(files, llmBackend, apiKey, model, ollamaUrl
             for (const issue of result.issues) {
                 allIssues.push(issue);
             }
-            core.info(`Batch ${batchNum}: Found ${result.issues.length} issues`);
+            console.log(`Batch ${batchNum}: Found ${result.issues.length} issues`);
             if (batches.length > 1 && i < batches.length - 1) {
                 await new Promise(resolve => setTimeout(resolve, 1000));
             }
         }
         catch (error) {
-            core.warning(`Batch ${batchNum} failed: ${error instanceof Error ? error.message : String(error)}`);
+            console.warn(`Batch ${batchNum} failed: ${error instanceof Error ? error.message : String(error)}`);
         }
     }
     return {
-        issues: allIssues,
+        issues: allIssues.slice(0, types_1.MAX_ISSUES),
+        summary: `Analyzed ${files.length} files, found ${allIssues.length} issues`,
     };
 }
 
@@ -32796,10 +32767,8 @@ class GeminiClient {
             const text = result.response.text();
             const parsed = JSON.parse(text);
             const issues = (parsed.issues || []).map((issue) => {
-                const rawSeverity = String(issue.severity || 'suggestion').toUpperCase();
-                const severity = rawSeverity === 'CRITICAL' ? 'CRITICAL' :
-                    rawSeverity === 'IMPORTANT' ? 'IMPORTANT' :
-                        rawSeverity === 'NIT' ? 'NIT' : 'SUGGESTION';
+                const rawSeverity = String(issue.severity || 'GOOD_PRACTICE').toUpperCase();
+                const severity = rawSeverity === 'VIOLATION' ? 'VIOLATION' : 'GOOD_PRACTICE';
                 return {
                     file: String(issue.file || ''),
                     line: issue.line ? Number(issue.line) : null,
@@ -32839,11 +32808,9 @@ class OllamaClient {
     model;
     constructor(host = 'http://localhost:11434', model = 'qwen2.5-coder:32b', apiKey) {
         this.model = model;
-        // Configure Ollama client with host and optional auth
         const config = {
             host: host.replace(/\/$/, ''),
         };
-        // Add Authorization header if API key provided (for Ollama Cloud)
         if (apiKey) {
             config.headers = {
                 Authorization: `Bearer ${apiKey}`,
@@ -32873,7 +32840,6 @@ class OllamaClient {
         }
         catch (error) {
             const message = error instanceof Error ? error.message : String(error);
-            // Provide helpful error message for auth issues
             if (message.includes('401') || message.includes('Unauthorized')) {
                 throw new Error(`Ollama authentication failed. For Ollama Cloud, ensure:\n` +
                     `  1. You have a valid API key from https://ollama.com/settings/keys\n` +
@@ -32895,10 +32861,8 @@ class OllamaClient {
                 parsed = JSON.parse(content);
             }
             const issues = (parsed.issues || []).map((issue) => {
-                const rawSeverity = String(issue.severity || 'suggestion').toUpperCase();
-                const severity = rawSeverity === 'CRITICAL' ? 'CRITICAL' :
-                    rawSeverity === 'IMPORTANT' ? 'IMPORTANT' :
-                        rawSeverity === 'NIT' ? 'NIT' : 'SUGGESTION';
+                const rawSeverity = String(issue.severity || 'GOOD_PRACTICE').toUpperCase();
+                const severity = rawSeverity === 'VIOLATION' ? 'VIOLATION' : 'GOOD_PRACTICE';
                 return {
                     file: String(issue.file || ''),
                     line: issue.line ? Number(issue.line) : null,
@@ -32925,35 +32889,6 @@ exports.OllamaClient = OllamaClient;
 
 /***/ }),
 
-/***/ 5597:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.formatDiffForAnalysis = formatDiffForAnalysis;
-// Format file diffs for LLM analysis - extracts only added lines from patches
-function formatDiffForAnalysis(files) {
-    const lines = [];
-    for (const file of files) {
-        if (!file.patch)
-            continue;
-        lines.push(`=== ${file.filename} ===`);
-        const patchLines = file.patch.split('\n');
-        for (const line of patchLines) {
-            if (line.startsWith('+') && !line.startsWith('+++')) {
-                const code = line.substring(1);
-                lines.push(code);
-            }
-        }
-        lines.push('');
-    }
-    return lines.join('\n');
-}
-
-
-/***/ }),
-
 /***/ 1350:
 /***/ ((__unused_webpack_module, exports) => {
 
@@ -32962,11 +32897,38 @@ function formatDiffForAnalysis(files) {
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.buildPrompt = buildPrompt;
 exports.getSystemPrompt = getSystemPrompt;
-const SYSTEM_PROMPT = `You are an expert WCAG 2.1/2.2 accessibility auditor and front-end developer. Your task is to analyze code diffs, identify accessibility violations, and provide EXACT code fixes.
+const SYSTEM_PROMPT = `You are an expert WCAG 2.2 accessibility auditor. Your task is to analyze code diffs for accessibility issues and provide EXACT code fixes.
+
+## Severity Classification (ONLY TWO LEVELS)
+
+🔴 **VIOLATION** - WCAG 2.2 failures that MUST be fixed:
+- Missing alt text on meaningful images
+- Form inputs without labels or accessible names
+- Keyboard traps or impossible keyboard navigation
+- Missing focus indicators (outline removed without alternative)
+- Interactive elements without accessible names
+- Color contrast below WCAG requirements (4.5:1 normal text, 3:1 large text)
+- Links with unclear purpose ("click here", "read more")
+- Missing form field instructions or error messages
+- Duplicate IDs breaking assistive technology
+- Missing lang attribute on HTML element
+- Tables without proper headers
+- Auto-playing media without controls
+- Focus order not matching visual order
+- ARIA roles used incorrectly
+
+🟢 **GOOD_PRACTICE** - Accessibility improvements that enhance UX:
+- Missing landmark regions (main, nav, aside)
+- Improper heading hierarchy (skipping levels)
+- Suboptimal focus visibility (present but could be clearer)
+- Long link texts that could be shortened
+- Redundant ARIA labels
+- Title attributes on links when text is already clear
+- Missing skip links (not required but recommended)
 
 ## Response Format
 
-You MUST respond with ONLY valid JSON. No markdown, no explanations outside the JSON.
+You MUST respond with ONLY valid JSON:
 
 {
   "issues": [
@@ -32975,185 +32937,100 @@ You MUST respond with ONLY valid JSON. No markdown, no explanations outside the 
       "line": 42,
       "wcag_criterion": "1.1.1",
       "wcag_level": "A",
-      "severity": "CRITICAL",
-      "title": "Concise issue title",
-      "description": "What's wrong and why it matters for accessibility",
-      "suggestion": "EXACT code that fixes the issue - this will be used in a suggestion block"
+      "severity": "VIOLATION",
+      "title": "Image missing alternative text",
+      "description": "Screen reader users cannot understand the content of this image. Add meaningful alt text describing the image.",
+      "suggestion": "<img src='hero.jpg' alt='Team celebrating product launch' />"
     }
   ],
-  "summary": "Brief summary of overall accessibility health"
+  "summary": "2 violations and 1 good practice recommendation found"
 }
 
-## Severity Classification
+## CRITICAL: Line Numbers
 
-🔴 CRITICAL - User blockers that MUST be fixed:
-- Missing alt text on meaningful images
-- Form inputs without labels (name, email, password, etc.)
-- Keyboard traps or impossible keyboard navigation
-- Missing focus indicators
-- Interactive elements without accessible names
-- Skip links missing or broken
-- ARIA roles used incorrectly breaking screen readers
+The "line" field MUST be the EXACT line number in the NEW file where the issue exists. This is used for inline suggestions.
 
-🟠 IMPORTANT - WCAG A/AA violations:
-- Low color contrast (< 4.5:1 for normal text, < 3:1 for large)
-- Links with vague text ("click here", "read more", "link")
-- Missing form field instructions
-- Duplicate IDs breaking assistive tech
-- Missing lang attribute on HTML
-- Tables without proper headers
-- Auto-playing media without controls
+To find the correct line number from a diff:
+1. Look at hunks starting with @@ -a,b +x,y @@
+2. The number after + is the starting line of the new file
+3. Lines starting with + are additions - count from the start
+4. Lines starting with space are context - also count
+5. Lines starting with - are deletions - DON'T count
 
-🟡 SUGGESTION - Best practices that improve UX:
-- Missing landmark regions (main, nav, aside)
-- Improper heading hierarchy
-- Missing skip links
-- Focus visible but could be more prominent
-- Long link texts that could be shortened
-
-⚪ NIT - Minor improvements:
-- Redundant ARIA labels
-- Title attributes on links (redundant with text)
-- Small contrast improvements
+Example diff:
+\`\`\`
+@@ -10,5 +100,5 +105,5 @@
+ context line
+ context line
++new line here      <- this is line 107
++another new line   <- this is line 108
+ context line
+\`\`\`
 
 ## CRITICAL: Suggestion Format
 
-The "suggestion" field MUST contain the EXACT code that replaces the problematic line(s). This will be inserted into a GitHub suggestion block.
+The "suggestion" field MUST contain EXACT code that can be used in a GitHub suggestion block.
 
-GOOD suggestions:
-- "aria-label='Submit form'"
-- "<button aria-label='Close menu' onClick={handleClose}>×</button>"
-- "<img src='chart.png' alt='Bar chart showing Q3 revenue increased 15%' />"
-- "<input type='text' id='email' aria-label='Email address' />"
-- "<a href='/pricing' aria-label='View our pricing plans'>Learn more</a>"
+GOOD suggestions (actual code):
+- \`aria-label="Submit form"\`
+- \`<button aria-label="Close menu" onClick={handleClose}>×</button>\`
+- \`<img src="chart.png" alt="Bar chart showing Q3 revenue" />\`
+- \`<input type="text" id="email" aria-label="Email address" />\`
 
-BAD suggestions (DO NOT DO THIS):
+BAD suggestions (DO NOT USE):
 - "Add alt text" - too vague
-- "The image needs alt text" - descriptive, not code
+- "The image needs alt text" - not code
 - "Make sure to add aria-label" - instruction, not code
-- "Use aria-describedby for more context" - not actual code
 
-## WCAG Criteria Reference
+## WCAG 2.2 Criteria Reference
 
 **Perceivable (1.x)**
-- 1.1.1 Non-text Content: ALL images need meaningful alt text. Alt="" ONLY for decorative images.
-- 1.3.1 Info & Relationships: Use semantic HTML (headings, lists, landmarks, tables with headers)
-- 1.4.3 Contrast: Text must have 4.5:1 ratio, large text 3:1
+- 1.1.1 Non-text Content: All images need meaningful alt (empty only for decorative)
+- 1.3.1 Info & Relationships: Use semantic HTML (headings, lists, landmarks)
+- 1.4.3 Contrast: 4.5:1 for normal text, 3:1 for large text
 - 1.4.11 Non-text Contrast: UI components need 3:1 contrast
 
 **Operable (2.x)**
-- 2.1.1 Keyboard: EVERYTHING must be keyboard accessible - no mouse-only interactions
-- 2.1.2 No Keyboard Trap: Users must be able to navigate AWAY from components (modals need Escape to close)
-- 2.4.3 Focus Order: Tab order must match visual order
-- 2.4.4 Link Purpose: Link text must describe destination (NOT "click here")
-- 2.4.7 Focus Visible: Focus indicator must be visible (no outline:none without alternative)
+- 2.1.1 Keyboard: Everything must be keyboard accessible
+- 2.1.2 No Keyboard Trap: Users must escape components (Escape for modals)
+- 2.4.3 Focus Order: Tab order matches visual order
+- 2.4.4 Link Purpose: Link text describes destination
+- 2.4.7 Focus Visible: Focus indicator must be visible
 
 **Understandable (3.x)**
-- 3.1.1 Language: HTML element MUST have lang attribute
-- 3.2.1 On Focus: Focus must NOT trigger unexpected changes
-- 3.3.1 Error Identification: Errors must be described to users, not just visual
-- 3.3.2 Labels: ALL form fields need labels (visible or aria-label)
+- 3.1.1 Language: HTML element has lang attribute
+- 3.2.1 On Focus: Focus doesn't trigger unexpected changes  
+- 3.3.1 Error Identification: Errors described to users
+- 3.3.2 Labels: All form fields have labels
 
 **Robust (4.x)**
 - 4.1.1 Parsing: Valid HTML, no duplicate IDs
-- 4.1.2 Name, Role, Value: Custom components must expose proper ARIA
+- 4.1.2 Name, Role, Value: Custom components expose proper ARIA
 
-## Framework-Specific Issues
+## Framework-Specific Patterns
 
 **React/JSX:**
-- Use aria-label when visible text isn't possible
-- htmlFor for labels, NOT for
-- Fragment shorthand <> creates accessibility issues with headings
+- Use aria-label when visible text impossible
 - Use <button> for clickable elements, NOT <div onClick>
-- If using onClick on non-button, add role="button" AND onKeyDown handler
+- If onClick on non-button: add role="button" AND onKeyDown handler
 
 **HTML:**
-- NEVER use <div onClick> without role, keyboard handling, and tabindex
-- Use <button> for actions, <a> for navigation
-- <img> ALWAYS needs alt (empty string for decorative)
+- NEVER use <div onClick> without role, keyboard handler, tabindex
+- <img> ALWAYS needs alt (empty for decorative)
 - <input> needs label or aria-label
-- Tables need <th> with scope for headers
-
-**Vue/Svelte:**
-- Same as React for component patterns
-- v-on:click needs corresponding keyboard handler
-- Use <button> for interactive elements
-
-## Examples of Issues and Fixes
-
-### Example 1: Missing Alt Text
-BAD:
-\`\`\`
-<img src="hero.jpg" />
-\`\`\`
-GOOD:
-\`\`\`
-<img src="hero.jpg" alt="Team celebrating product launch" />
-\`\`\`
-Suggestion: "alt='Team celebrating product launch'"
-
-### Example 2: Missing Form Label
-BAD:
-\`\`\`
-<input type="email" placeholder="Email" />
-\`\`\`
-GOOD:
-\`\`\`
-<label for="email">Email address</label>
-<input type="email" id="email" name="email" />
-\`\`\`
-Suggestion: "aria-label='Email address'"
-
-### Example 3: Vague Link
-BAD:
-\`\`\`
-<a href="/docs">Click here</a>
-\`\`\`
-GOOD:
-\`\`\`
-<a href="/docs">Read our documentation</a>
-\`\`\`
-Suggestion: ">Read our documentation</a>"
-
-### Example 4: Keyboard Accessibility
-BAD:
-\`\`\`
-<div onClick={handleClick}>Submit</div>
-\`\`\`
-GOOD:
-\`\`\`
-<button onClick={handleClick}>Submit</button>
-\`\`\`
-Suggestion: "<button onClick={handleClick}>Submit</button>"
-
-### Example 5: Missing Focus Style
-BAD:
-\`\`\`
-.button:focus { outline: none; }
-\`\`\`
-GOOD:
-\`\`\`
-.button:focus { outline: 2px solid blue; outline-offset: 2px; }
-\`\`\`
-Suggestion: "outline: 2px solid blue; outline-offset: 2px;"
+- Use <button> for actions, <a> for navigation
 
 ## Output Rules
 
-1. ONLY report issues in lines marked with '+' (added/modified content)
-2. The 'line' number must be the actual line number in the NEW file, not the diff
-3. 'suggestion' must be executable code that can replace the problematic portion
-4. Be specific about WCAG criterion (e.g., "1.1.1" not "1.x")
-5. 'description' should explain WHY this matters for users with disabilities
-6. If no issues found, return: {"issues": [], "summary": "No accessibility issues found in this diff"}
+1. ONLY report issues in lines with '+' (added/modified code)
+2. The 'line' MUST be the exact line number in the NEW file
+3. 'suggestion' must be actual code, not instructions
+4. 'severity' must be exactly "VIOLATION" or "GOOD_PRACTICE"
+5. 'wcag_criterion' should be specific (e.g., "1.1.1" not "1.x")
+6. 'description' explains WHY it matters for accessibility
+7. If no issues: \`{"issues": [], "summary": "No accessibility issues found"}\`
 
-## Remember
-
-- You are auditing for REAL users with disabilities
-- A missing alt text isn't just a "suggestion" - it blocks a screen reader user
-- A keyboard trap means someone CANNOT use the application at all
-- Color contrast errors make content unreadable for many users
-- Every issue you find prevents someone from accessing the web
-- Your suggestions will be applied directly to code - make them work!`;
+Remember: You audit for REAL users with disabilities. Every VIOLATION blocks someone from accessing your content.`;
 function buildPrompt(owner, repo, prNumber) {
     return `## Context
 
@@ -33162,22 +33039,20 @@ PR Number: #${prNumber}
 
 ## Your Task
 
-Analyze the code diff below for WCAG 2.1/2.2 accessibility violations.
+Analyze the code diff below for WCAG 2.2 accessibility issues.
 
 1. Focus ONLY on lines starting with '+' (new/modified code)
-2. Identify real accessibility barriers, not style preferences
-3. For each issue, provide EXACT code that fixes it
-4. Classify severity correctly (CRITICAL blocks users, IMPORTANT violates WCAG, etc.)
-5. Be specific about WCAG criteria
+2. Identify real accessibility barriers
+3. Classify as VIOLATION (required fix) or GOOD_PRACTICE (recommended improvement)
+4. Provide EXACT code for suggestions
+5. Ensure line numbers are accurate in the NEW file
 
 ## Important
 
 - Return ONLY valid JSON
-- The 'suggestion' field must contain actual code (e.g., "alt='Product photo'" not "add alt text")
-- Line numbers must be accurate to the new file
-- If the same file has multiple issues, report each one separately
-- Do NOT report issues in deleted lines (starting with '-')
-- Empty alt="" is correct for decorative images - do NOT flag as issue`;
+- Use "VIOLATION" or "GOOD_PRACTICE" for severity (no other values)
+- Empty alt="" is correct for decorative images - do NOT flag
+- The suggestion must be code that fixes the issue`;
 }
 function getSystemPrompt() {
     return SYSTEM_PROMPT;

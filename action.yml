@@ -1,5 +1,5 @@
 name: 'A11y PR Review'
-description: 'Automated accessibility (WCAG) review for pull requests using LLM analysis'
+description: 'Automated WCAG 2.2 accessibility review for pull requests using LLM analysis'
 author: 'Accessibility Team'
 
 branding:
@@ -27,7 +27,7 @@ inputs:
       Model to use for analysis.
       - Gemini (default): gemini-2.0-flash
       - Ollama (default): qwen2.5-coder:32b
-      - Ollama Cloud: Use models with -cloud suffix (e.g., llama3.2:3b-cloud)
+      - Ollama Cloud: Use any supported model (e.g., llama3.2)
     required: false
     default: 'gemini-2.0-flash'
   ollama-url:
@@ -38,13 +38,17 @@ inputs:
     required: false
     default: 'http://localhost:11434'
   fail-on-issues:
-    description: 'Fail the action if CRITICAL or IMPORTANT accessibility issues are found'
+    description: 'Fail the action if WCAG 2.2 VIOLATION issues are found (GOOD_PRACTICE does not fail)'
     required: false
     default: 'true'
 
 outputs:
   issues-found:
-    description: 'Number of accessibility issues found'
+    description: 'Total number of accessibility issues found'
+  violations:
+    description: 'Number of WCAG 2.2 violations (must be fixed)'
+  good-practices:
+    description: 'Number of good practices (recommended improvements)'
 
 runs:
   using: 'node20'

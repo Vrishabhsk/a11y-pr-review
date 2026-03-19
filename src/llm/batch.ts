@@ -1,33 +1,32 @@
-import * as core from '@actions/core';
-import { GeminiClient } from './gemini-client';
-import { OllamaClient } from './ollama-client';
-import { A11yIssue, FilePatch, BATCH_SIZE } from '../state/types';
-import { formatDiffForAnalysis } from '../parsers/diff-parser';
+import { A11yIssue, MAX_ISSUES } from '../state/types';
 
-interface LLMClient {
-  analyze(diffContent: string, prompt: string): Promise<{ issues: A11yIssue[]; summary: string }>;
+interface AnalysisResult {
+  issues: A11yIssue[];
+  summary: string;
 }
 
-interface BatchResult {
-  issues: A11yIssue[];
+interface LLMClient {
+  analyze(diffContent: string, prompt: string): Promise<AnalysisResult>;
 }
 
 export async function analyzeFilesInBatches(
-  files: FilePatch[],
+  files: Array<{ filename: string; patch?: string }>,
   llmBackend: string,
   apiKey: string | undefined,
   model: string,
   ollamaUrl: string,
   prompt: string
-): Promise<BatchResult> {
+): Promise<AnalysisResult> {
+  const BATCH_SIZE = 20;
   const allIssues: A11yIssue[] = [];
 
-  const batches: FilePatch[][] = [];
+  const batches: Array<Array<{ filename: string; patch?: string }>> = [];
   for (let i = 0; i < files.length; i += BATCH_SIZE) {
     batches.push(files.slice(i, i + BATCH_SIZE));
   }
 
-  core.info(`Analyzing ${files.length} files in ${batches.length} batch(es)`);
+  const { GeminiClient } = await import('./gemini-client');
+  const { OllamaClient } = await import('./ollama-client');
 
   const client: LLMClient = llmBackend === 'gemini'
     ? new GeminiClient(apiKey || '', model)
@@ -37,12 +36,24 @@ export async function analyzeFilesInBatches(
     const batch = batches[i];
     const batchNum = i + 1;
     
-    core.info(`Analyzing batch ${batchNum}/${batches.length} (${batch.length} files)`);
+    console.log(`Analyzing batch ${batchNum}/${batches.length} (${batch.length} files)`);
 
-    const diffContent = formatDiffForAnalysis(batch);
+    const diffLines: string[] = [];
+    for (const file of batch) {
+      if (!file.patch) continue;
+      diffLines.push(`=== ${file.filename} ===`);
+      for (const line of file.patch.split('\n')) {
+        if (line.startsWith('+') && !line.startsWith('+++')) {
+          diffLines.push(line.substring(1));
+        }
+      }
+      diffLines.push('');
+    }
+
+    const diffContent = diffLines.join('\n');
 
     if (!diffContent.trim()) {
-      core.info(`Batch ${batchNum} has no relevant content, skipping`);
+      console.log(`Batch ${batchNum} has no content, skipping`);
       continue;
     }
 
@@ -53,17 +64,18 @@ export async function analyzeFilesInBatches(
         allIssues.push(issue);
       }
 
-      core.info(`Batch ${batchNum}: Found ${result.issues.length} issues`);
+      console.log(`Batch ${batchNum}: Found ${result.issues.length} issues`);
 
       if (batches.length > 1 && i < batches.length - 1) {
         await new Promise(resolve => setTimeout(resolve, 1000));
       }
     } catch (error) {
-      core.warning(`Batch ${batchNum} failed: ${error instanceof Error ? error.message : String(error)}`);
+      console.warn(`Batch ${batchNum} failed: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
   return {
-    issues: allIssues,
+    issues: allIssues.slice(0, MAX_ISSUES),
+    summary: `Analyzed ${files.length} files, found ${allIssues.length} issues`,
   };
 }

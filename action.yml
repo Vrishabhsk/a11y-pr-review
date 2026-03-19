@@ -1,5 +1,5 @@
 name: 'A11y PR Review'
-description: 'Automated accessibility (WCAG) review for pull requests'
+description: 'Automated accessibility (WCAG) review for pull requests using LLM analysis'
 author: 'Accessibility Team'
 
 branding:
@@ -12,22 +12,33 @@ inputs:
     required: true
     default: ${{ github.token }}
   llm-backend:
-    description: 'LLM backend (gemini or ollama)'
+    description: 'LLM backend to use: "gemini" or "ollama"'
     required: true
     default: 'gemini'
   api-key:
-    description: 'API key (Gemini API key or Ollama auth)'
+    description: |
+      API key for authentication.
+      - For Gemini: Required. Your Google AI API key.
+      - For Ollama Cloud: Required if using ollama.com. Can also set OLLAMA_API_KEY env var.
+      - For local Ollama: Optional, only needed if your server requires auth.
     required: false
   model:
-    description: 'Model to use'
+    description: |
+      Model to use for analysis.
+      - Gemini (default): gemini-2.0-flash
+      - Ollama (default): qwen2.5-coder:32b
+      - Ollama Cloud: Use models with -cloud suffix (e.g., llama3.2:3b-cloud)
     required: false
     default: 'gemini-2.0-flash'
   ollama-url:
-    description: 'Ollama API URL (if using ollama backend)'
+    description: |
+      Ollama API URL (only for ollama backend).
+      - Local: http://localhost:11434 (default)
+      - Ollama Cloud: https://ollama.com
     required: false
     default: 'http://localhost:11434'
   fail-on-issues:
-    description: 'Fail the action if accessibility issues are found'
+    description: 'Fail the action if CRITICAL or IMPORTANT accessibility issues are found'
     required: false
     default: 'true'
 

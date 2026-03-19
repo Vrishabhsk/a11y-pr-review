@@ -15,7 +15,7 @@ interface BatchResult {
 export async function analyzeFilesInBatches(
   files: FilePatch[],
   llmBackend: string,
-  apiKey: string,
+  apiKey: string | undefined,
   model: string,
   ollamaUrl: string,
   prompt: string
@@ -30,8 +30,8 @@ export async function analyzeFilesInBatches(
   core.info(`Analyzing ${files.length} files in ${batches.length} batch(es)`);
 
   const client: LLMClient = llmBackend === 'gemini'
-    ? new GeminiClient(apiKey, model)
-    : new OllamaClient(ollamaUrl, model);
+    ? new GeminiClient(apiKey || '', model)
+    : new OllamaClient(ollamaUrl, model, apiKey);
 
   for (let i = 0; i < batches.length; i++) {
     const batch = batches[i];

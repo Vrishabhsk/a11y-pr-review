@@ -15,7 +15,8 @@ interface AnalysisResult {
 export declare class OllamaClient {
     private apiUrl;
     private model;
-    constructor(apiUrl?: string, model?: string);
+    private apiKey;
+    constructor(apiUrl?: string, model?: string, apiKey?: string);
     analyze(diffContent: string, prompt: string): Promise<AnalysisResult>;
 }
 export {};

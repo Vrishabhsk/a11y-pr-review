@@ -31865,9 +31865,18 @@ async function run() {
         const model = core.getInput('model') || (llmBackend === 'gemini' ? 'gemini-2.0-flash' : 'qwen2.5-coder:32b');
         const ollamaUrl = core.getInput('ollama-url') || 'http://localhost:11434';
         const failOnIssues = core.getInput('fail-on-issues').toLowerCase() !== 'false';
+        // Validate API key requirements
         if (llmBackend === 'gemini' && !apiKey) {
             core.setFailed('api-key is required for Gemini backend');
             return;
+        }
+        // Warn if using Ollama Cloud without API key
+        if (llmBackend === 'ollama' && ollamaUrl.includes('ollama.com') && !apiKey) {
+            core.warning('Using Ollama Cloud without api-key. Set OLLAMA_API_KEY env var or provide api-key input.');
+        }
+        // Warn if using local Ollama without a running server
+        if (llmBackend === 'ollama' && !ollamaUrl.includes('ollama.com') && apiKey) {
+            core.info('API key provided for local Ollama - will use for authentication if required');
         }
         const context = github.context;
         if (context.eventName !== 'pull_request' && context.eventName !== 'pull_request_target') {
@@ -32037,8 +32046,8 @@ async function analyzeFilesInBatches(files, llmBackend, apiKey, model, ollamaUrl
     }
     core.info(`Analyzing ${files.length} files in ${batches.length} batch(es)`);
     const client = llmBackend === 'gemini'
-        ? new gemini_client_1.GeminiClient(apiKey, model)
-        : new ollama_client_1.OllamaClient(ollamaUrl, model);
+        ? new gemini_client_1.GeminiClient(apiKey || '', model)
+        : new ollama_client_1.OllamaClient(ollamaUrl, model, apiKey);
     for (let i = 0; i < batches.length; i++) {
         const batch = batches[i];
         const batchNum = i + 1;
@@ -32164,16 +32173,40 @@ exports.OllamaClient = void 0;
 class OllamaClient {
     apiUrl;
     model;
-    constructor(apiUrl = 'http://localhost:11434', model = 'qwen2.5-coder:32b') {
+    apiKey;
+    constructor(apiUrl = 'http://localhost:11434', model = 'qwen2.5-coder:32b', apiKey) {
         this.apiUrl = apiUrl.replace(/\/$/, '');
         this.model = model;
+        this.apiKey = apiKey || null;
     }
     async analyze(diffContent, prompt) {
         const fullPrompt = `${prompt}\n\n---\n\n## Code Diff:\n\n${diffContent}\n\nRespond with valid JSON only.`;
-        const response = await fetch(`${this.apiUrl}/api/generate`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
+        // Use /api/chat for cloud (Ollama.com) or /api/generate for local
+        const isCloud = this.apiUrl.includes('ollama.com');
+        const endpoint = isCloud ? '/api/chat' : '/api/generate';
+        const headers = { 'Content-Type': 'application/json' };
+        if (this.apiKey) {
+            headers['Authorization'] = `Bearer ${this.apiKey}`;
+        }
+        let body;
+        if (isCloud) {
+            // Cloud API uses chat format
+            body = {
+                model: this.model,
+                messages: [
+                    { role: 'user', content: fullPrompt }
+                ],
+                stream: false,
+                format: 'json',
+                options: {
+                    temperature: 0.1,
+                    num_ctx: 32768,
+                },
+            };
+        }
+        else {
+            // Local API uses generate format
+            body = {
                 model: this.model,
                 prompt: fullPrompt,
                 stream: false,
@@ -32182,17 +32215,33 @@ class OllamaClient {
                     temperature: 0.1,
                     num_ctx: 32768,
                 },
-            }),
+            };
+        }
+        const response = await fetch(`${this.apiUrl}${endpoint}`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(body),
         });
         if (!response.ok) {
             const text = await response.text();
-            throw new Error(`Ollama API error (${response.status}): ${text}`);
+            const authHint = response.status === 401
+                ? ' (API key may be required - set ollama-api-key input or OLLAMA_API_KEY env var)'
+                : '';
+            throw new Error(`Ollama API error (${response.status}): ${text}${authHint}`);
         }
         const data = await response.json();
         if (data.error) {
             throw new Error(`Ollama error: ${data.error}`);
         }
-        const content = data.response || '';
+        // Extract content based on API type
+        let content;
+        if (isCloud && data.message && typeof data.message === 'object') {
+            const msg = data.message;
+            content = String(msg.content || '');
+        }
+        else {
+            content = String(data.response || '');
+        }
         try {
             let parsed;
             const jsonMatch = content.match(/\{[\s\S]*\}/);

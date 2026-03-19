@@ -17,19 +17,45 @@ interface AnalysisResult {
 export class OllamaClient {
   private apiUrl: string;
   private model: string;
+  private apiKey: string | null;
 
-  constructor(apiUrl: string = 'http://localhost:11434', model: string = 'qwen2.5-coder:32b') {
+  constructor(apiUrl: string = 'http://localhost:11434', model: string = 'qwen2.5-coder:32b', apiKey?: string) {
     this.apiUrl = apiUrl.replace(/\/$/, '');
     this.model = model;
+    this.apiKey = apiKey || null;
   }
 
   async analyze(diffContent: string, prompt: string): Promise<AnalysisResult> {
     const fullPrompt = `${prompt}\n\n---\n\n## Code Diff:\n\n${diffContent}\n\nRespond with valid JSON only.`;
 
-    const response = await fetch(`${this.apiUrl}/api/generate`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+    // Use /api/chat for cloud (Ollama.com) or /api/generate for local
+    const isCloud = this.apiUrl.includes('ollama.com');
+    const endpoint = isCloud ? '/api/chat' : '/api/generate';
+
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (this.apiKey) {
+      headers['Authorization'] = `Bearer ${this.apiKey}`;
+    }
+
+    let body: object;
+    
+    if (isCloud) {
+      // Cloud API uses chat format
+      body = {
+        model: this.model,
+        messages: [
+          { role: 'user', content: fullPrompt }
+        ],
+        stream: false,
+        format: 'json',
+        options: {
+          temperature: 0.1,
+          num_ctx: 32768,
+        },
+      };
+    } else {
+      // Local API uses generate format
+      body = {
         model: this.model,
         prompt: fullPrompt,
         stream: false,
@@ -38,21 +64,37 @@ export class OllamaClient {
           temperature: 0.1,
           num_ctx: 32768,
         },
-      }),
+      };
+    }
+
+    const response = await fetch(`${this.apiUrl}${endpoint}`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
     });
 
     if (!response.ok) {
       const text = await response.text();
-      throw new Error(`Ollama API error (${response.status}): ${text}`);
+      const authHint = response.status === 401 
+        ? ' (API key may be required - set ollama-api-key input or OLLAMA_API_KEY env var)'
+        : '';
+      throw new Error(`Ollama API error (${response.status}): ${text}${authHint}`);
     }
 
-    const data = await response.json() as { response?: string; error?: string };
+    const data = await response.json() as Record<string, unknown>;
     
     if (data.error) {
       throw new Error(`Ollama error: ${data.error}`);
     }
 
-    const content = data.response || '';
+    // Extract content based on API type
+    let content: string;
+    if (isCloud && data.message && typeof data.message === 'object') {
+      const msg = data.message as Record<string, unknown>;
+      content = String(msg.content || '');
+    } else {
+      content = String((data as { response?: string }).response || '');
+    }
     
     try {
       let parsed: Record<string, unknown>;
@@ -64,7 +106,7 @@ export class OllamaClient {
         parsed = JSON.parse(content);
       }
 
-      const issues: A11yIssue[] = (parsed.issues as Array<Record<string, unknown>> || []).map((issue) => {
+      const issues: A11yIssue[] = ((parsed.issues as Array<Record<string, unknown>>) || []).map((issue) => {
         const rawSeverity = String(issue.severity || 'suggestion').toUpperCase();
         const severity: A11yIssue['severity'] = 
           rawSeverity === 'CRITICAL' ? 'CRITICAL' :

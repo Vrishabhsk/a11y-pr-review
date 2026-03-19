@@ -19,9 +19,20 @@ async function run(): Promise<void> {
     const ollamaUrl = core.getInput('ollama-url') || 'http://localhost:11434';
     const failOnIssues = core.getInput('fail-on-issues').toLowerCase() !== 'false';
 
+    // Validate API key requirements
     if (llmBackend === 'gemini' && !apiKey) {
       core.setFailed('api-key is required for Gemini backend');
       return;
+    }
+
+    // Warn if using Ollama Cloud without API key
+    if (llmBackend === 'ollama' && ollamaUrl.includes('ollama.com') && !apiKey) {
+      core.warning('Using Ollama Cloud without api-key. Set OLLAMA_API_KEY env var or provide api-key input.');
+    }
+
+    // Warn if using local Ollama without a running server
+    if (llmBackend === 'ollama' && !ollamaUrl.includes('ollama.com') && apiKey) {
+      core.info('API key provided for local Ollama - will use for authentication if required');
     }
 
     const context = github.context;

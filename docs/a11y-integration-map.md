@@ -53,9 +53,9 @@ When using `llm-backend: ollama` with a local Ollama instance:
 │                     Self-Hosted Runner Environment                      │
 │                                                                         │
 │   ┌─────────────────┐         ┌─────────────────┐                       │
-│   │  GitHub Runner   │         │  Ollama Server  │                      │
-│   │  (localhost)     │────────▶│  (localhost:    │                      │
-│   │                  │ HTTP    │   11434)         │                     │
+│   │  GitHub Runner  │         │  Ollama Server │                        │
+│   │  (localhost)    │────────▶│  (localhost:   │                        │
+│   │                 │ HTTP    │   11434)       │                        │
 │   └─────────────────┘         └─────────────────┘                       │
 │                                                                         │
 │   Security Note: Ollama on localhost has no authentication by default.  │
@@ -349,5 +349,3 @@ curl http://localhost:11434/api/tags
 | 1.0 | 2026-03-19 | Initial document creation |
 
 ---
-
-*Document maintained by: DevOps Team*

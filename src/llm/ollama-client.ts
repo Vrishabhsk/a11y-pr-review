@@ -1,3 +1,5 @@
+import { Ollama } from 'ollama';
+
 interface A11yIssue {
   file: string;
   line: number | null;
@@ -15,87 +17,69 @@ interface AnalysisResult {
 }
 
 export class OllamaClient {
-  private apiUrl: string;
+  private ollama: Ollama;
   private model: string;
-  private apiKey: string | null;
 
-  constructor(apiUrl: string = 'http://localhost:11434', model: string = 'qwen2.5-coder:32b', apiKey?: string) {
-    this.apiUrl = apiUrl.replace(/\/$/, '');
+  constructor(host: string = 'http://localhost:11434', model: string = 'qwen2.5-coder:32b', apiKey?: string) {
     this.model = model;
-    this.apiKey = apiKey || null;
+    
+    // Configure Ollama client with host and optional auth
+    const config: { host: string; headers?: Record<string, string> } = {
+      host: host.replace(/\/$/, ''),
+    };
+
+    // Add Authorization header if API key provided (for Ollama Cloud)
+    if (apiKey) {
+      config.headers = {
+        Authorization: `Bearer ${apiKey}`,
+      };
+    }
+
+    this.ollama = new Ollama(config);
   }
 
   async analyze(diffContent: string, prompt: string): Promise<AnalysisResult> {
     const fullPrompt = `${prompt}\n\n---\n\n## Code Diff:\n\n${diffContent}\n\nRespond with valid JSON only.`;
 
-    // Use /api/chat for cloud (Ollama.com) or /api/generate for local
-    const isCloud = this.apiUrl.includes('ollama.com');
-    const endpoint = isCloud ? '/api/chat' : '/api/generate';
-
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (this.apiKey) {
-      headers['Authorization'] = `Bearer ${this.apiKey}`;
-    }
-
-    let body: object;
-    
-    if (isCloud) {
-      // Cloud API uses chat format
-      body = {
+    try {
+      const response = await this.ollama.chat({
         model: this.model,
         messages: [
           { role: 'user', content: fullPrompt }
         ],
-        stream: false,
         format: 'json',
         options: {
           temperature: 0.1,
           num_ctx: 32768,
         },
-      };
-    } else {
-      // Local API uses generate format
-      body = {
-        model: this.model,
-        prompt: fullPrompt,
-        stream: false,
-        format: 'json',
-        options: {
-          temperature: 0.1,
-          num_ctx: 32768,
-        },
-      };
-    }
+      });
 
-    const response = await fetch(`${this.apiUrl}${endpoint}`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body),
-    });
+      const content = response.message?.content || '';
+      
+      if (!content) {
+        throw new Error('Empty response from Ollama');
+      }
 
-    if (!response.ok) {
-      const text = await response.text();
-      const authHint = response.status === 401 
-        ? ' (API key may be required - set ollama-api-key input or OLLAMA_API_KEY env var)'
-        : '';
-      throw new Error(`Ollama API error (${response.status}): ${text}${authHint}`);
+      return this.parseResponse(content);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      
+      // Provide helpful error message for auth issues
+      if (message.includes('401') || message.includes('Unauthorized')) {
+        throw new Error(
+          `Ollama authentication failed. For Ollama Cloud, ensure:\n` +
+          `  1. You have a valid API key from https://ollama.com/settings/keys\n` +
+          `  2. Set the 'api-key' input or OLLAMA_API_KEY environment variable\n` +
+          `  3. Use 'ollama-url: https://ollama.com'\n` +
+          `Original error: ${message}`
+        );
+      }
+      
+      throw new Error(`Ollama API error: ${message}`);
     }
+  }
 
-    const data = await response.json() as Record<string, unknown>;
-    
-    if (data.error) {
-      throw new Error(`Ollama error: ${data.error}`);
-    }
-
-    // Extract content based on API type
-    let content: string;
-    if (isCloud && data.message && typeof data.message === 'object') {
-      const msg = data.message as Record<string, unknown>;
-      content = String(msg.content || '');
-    } else {
-      content = String((data as { response?: string }).response || '');
-    }
-    
+  private parseResponse(content: string): AnalysisResult {
     try {
       let parsed: Record<string, unknown>;
       

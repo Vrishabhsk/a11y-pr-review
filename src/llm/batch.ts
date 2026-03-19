@@ -43,10 +43,16 @@ export async function analyzeFilesInBatches(
       if (!file.patch) continue;
       diffLines.push(`=== ${file.filename} ===`);
       const patchLines = file.patch.split('\n');
+      let position = 0;
       for (const line of patchLines) {
         if (line.startsWith('+++')) continue;
         if (line.startsWith('-')) continue;
-        diffLines.push(line);
+        position++;
+        if (line.startsWith('+') || line.startsWith(' ')) {
+          diffLines.push(`[${position}] ${line}`);
+        } else if (line.startsWith('@@')) {
+          diffLines.push(line);
+        }
       }
       diffLines.push('');
     }

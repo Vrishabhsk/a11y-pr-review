@@ -32320,14 +32320,40 @@ function formatInlineComment(issue) {
         '',
         issue.description || 'This code does not meet WCAG 2.2 requirements.',
     ];
-    if (issue.suggestion) {
-        lines.push('');
-        lines.push('**Suggested fix:**');
-        lines.push('```suggestion');
-        lines.push(issue.suggestion);
-        lines.push('```');
+    if (issue.suggestion && issue.suggestion.trim()) {
+        const trimmedSuggestion = issue.suggestion.trim();
+        const isCodeSuggestion = isLikelyCode(trimmedSuggestion);
+        if (isCodeSuggestion) {
+            lines.push('');
+            lines.push('**Suggested fix:**');
+            lines.push('```suggestion');
+            lines.push(trimmedSuggestion);
+            lines.push('```');
+        }
+        else {
+            lines.push('');
+            lines.push(`**Suggested fix:** ${trimmedSuggestion}`);
+        }
     }
     return lines.join('\n');
+}
+function isLikelyCode(text) {
+    const codeIndicators = [
+        '<', '>', '{', '}', '()', '=>', 'function', 'const ', 'let ', 'var ',
+        'class ', 'import ', 'export ', 'return ', 'if ', 'for ', 'while ',
+        '=>', '->', '===', '!==', '==', '!=', '&&', '||', ';', '=>',
+        'aria-', 'data-', 'src=', 'href=', 'class=', 'id=', 'style=',
+        'input', 'button', 'div', 'span', 'form', 'label', 'img', 'a ',
+        'outline:', 'padding:', 'margin:', 'color:', 'background:',
+    ];
+    const lowerText = text.toLowerCase();
+    let matchCount = 0;
+    for (const indicator of codeIndicators) {
+        if (lowerText.includes(indicator.toLowerCase())) {
+            matchCount++;
+        }
+    }
+    return matchCount >= 2;
 }
 
 
@@ -32704,12 +32730,19 @@ async function analyzeFilesInBatches(files, llmBackend, apiKey, model, ollamaUrl
                 continue;
             diffLines.push(`=== ${file.filename} ===`);
             const patchLines = file.patch.split('\n');
+            let position = 0;
             for (const line of patchLines) {
                 if (line.startsWith('+++'))
                     continue;
                 if (line.startsWith('-'))
                     continue;
-                diffLines.push(line);
+                position++;
+                if (line.startsWith('+') || line.startsWith(' ')) {
+                    diffLines.push(`[${position}] ${line}`);
+                }
+                else if (line.startsWith('@@')) {
+                    diffLines.push(line);
+                }
             }
             diffLines.push('');
         }
@@ -33006,26 +33039,19 @@ You MUST respond with ONLY valid JSON:
   "summary": "2 violations and 1 good practice recommendation found"
 }
 
-## CRITICAL: Line Numbers
+## CRITICAL: Position Markers
 
-The "line" field MUST be the EXACT line number in the NEW file where the issue exists. This is used for inline suggestions.
+Each line in the diff is prefixed with [N] where N is the position (1-indexed) of that line in the diff file.
 
-To find the correct line number from a diff:
-1. Look at hunks starting with @@ -a,b +x,y @@
-2. The number after + is the starting line of the new file
-3. Lines starting with + are additions - count from the start
-4. Lines starting with space are context - also count
-5. Lines starting with - are deletions - DON'T count
+The "line" field in your response MUST be this position number, NOT a file line number. This position is used directly for inline comments.
 
-Example diff:
-\`\`\`
-@@ -10,5 +100,5 +105,5 @@
- context line
- context line
-+new line here      <- this is line 107
-+another new line   <- this is line 108
- context line
-\`\`\`
+Example diff format:
+- [1]  context code
+- [2] +new added line
+- [3] +another new line  
+- [4]  context after
+
+If you report an issue on line 2, the inline comment will be attached to the [2] +new added line.
 
 ## CRITICAL: Suggestion Format
 
@@ -33082,9 +33108,9 @@ BAD suggestions (DO NOT USE):
 
 ## Output Rules
 
-1. ONLY report issues in lines with '+' (added/modified code)
-2. The 'line' MUST be the exact line number in the NEW file
-3. 'suggestion' must be actual code, not instructions
+1. ONLY report issues on lines with '+' prefix (added/modified code)
+2. The 'line' MUST be the position number shown in [N] marker
+3. 'suggestion' must be actual code, not instructions (use plain text if no code fix)
 4. 'severity' must be exactly "VIOLATION" or "GOOD_PRACTICE"
 5. 'wcag_criterion' should be specific (e.g., "1.1.1" not "1.x")
 6. 'description' explains WHY it matters for accessibility

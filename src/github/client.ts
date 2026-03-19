@@ -288,13 +288,42 @@ function formatInlineComment(issue: A11yIssue): string {
     issue.description || 'This code does not meet WCAG 2.2 requirements.',
   ];
 
-  if (issue.suggestion) {
-    lines.push('');
-    lines.push('**Suggested fix:**');
-    lines.push('```suggestion');
-    lines.push(issue.suggestion);
-    lines.push('```');
+  if (issue.suggestion && issue.suggestion.trim()) {
+    const trimmedSuggestion = issue.suggestion.trim();
+    const isCodeSuggestion = isLikelyCode(trimmedSuggestion);
+
+    if (isCodeSuggestion) {
+      lines.push('');
+      lines.push('**Suggested fix:**');
+      lines.push('```suggestion');
+      lines.push(trimmedSuggestion);
+      lines.push('```');
+    } else {
+      lines.push('');
+      lines.push(`**Suggested fix:** ${trimmedSuggestion}`);
+    }
   }
 
   return lines.join('\n');
+}
+
+function isLikelyCode(text: string): boolean {
+  const codeIndicators = [
+    '<', '>', '{', '}', '()', '=>', 'function', 'const ', 'let ', 'var ',
+    'class ', 'import ', 'export ', 'return ', 'if ', 'for ', 'while ',
+    '=>', '->', '===', '!==', '==', '!=', '&&', '||', ';', '=>',
+    'aria-', 'data-', 'src=', 'href=', 'class=', 'id=', 'style=',
+    'input', 'button', 'div', 'span', 'form', 'label', 'img', 'a ',
+    'outline:', 'padding:', 'margin:', 'color:', 'background:',
+  ];
+
+  const lowerText = text.toLowerCase();
+  let matchCount = 0;
+  for (const indicator of codeIndicators) {
+    if (lowerText.includes(indicator.toLowerCase())) {
+      matchCount++;
+    }
+  }
+
+  return matchCount >= 2;
 }

@@ -32143,125 +32143,150 @@ async function getPRFiles(octokit, owner, repo, prNumber) {
     }
     return files;
 }
-function parsePatchForLinePositions(patch) {
-    // Returns map of NEW file line number -> position in diff (for GitHub API)
-    const lines = patch.split('\n');
+// Map file line numbers to diff position indices
+function buildLineToPositionMap(patch) {
     const lineMap = new Map();
+    const lines = patch.split('\n');
     let newLineNum = 0;
-    let inHunk = false;
     let position = 0;
+    let inHunk = false;
     for (const line of lines) {
+        // Match hunk header: @@ -a,b +c,d @@
         const hunkMatch = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
         if (hunkMatch) {
             newLineNum = parseInt(hunkMatch[1], 10);
             inHunk = true;
-            position++;
             continue;
         }
         if (!inHunk)
             continue;
-        position++; // Position for GitHub API (all lines in hunk)
+        position++; // Position in the diff (1-indexed relative to hunk start)
         if (line.startsWith('+')) {
-            // Added line - this is the new line number
+            // Added line - maps to this position
             lineMap.set(newLineNum, position);
             newLineNum++;
         }
         else if (line.startsWith('-')) {
-            // Deleted line - skip
+            // Deleted line - not in new file, skip
         }
         else if (line.startsWith(' ')) {
-            // Context line
+            // Context line - exists in both old and new
             newLineNum++;
         }
         else if (!line.startsWith('\\')) {
-            // Other content
+            // Other lines (like "\ No newline at end of file")
             newLineNum++;
         }
     }
     return lineMap;
 }
-async function createReview(octokit, owner, repo, prNumber, headSha, violations, goodPractices, filePatches) {
-    const comments = [];
-    // Get PR diffs to find correct line positions
+async function createReview(octokit, owner, repo, prNumber, headSha, violations, goodPractices, _filePatches) {
+    // Get fresh PR file data with patches
     const { data: prFiles } = await octokit.rest.pulls.listFiles({
         owner,
         repo,
         pull_number: prNumber,
         per_page: 100,
     });
-    // Build line position maps for each file
+    // Build line-to-position maps for each file
     const fileLineMaps = new Map();
     for (const file of prFiles) {
         if (file.patch) {
-            fileLineMaps.set(file.filename, parsePatchForLinePositions(file.patch));
+            fileLineMaps.set(file.filename, buildLineToPositionMap(file.patch));
         }
     }
+    const comments = [];
+    const unpostedViolations = [];
     // Create inline comments ONLY for violations
     for (const issue of violations) {
-        if (!issue || !issue.line || issue.line < 1 || !issue.file)
+        if (!issue || !issue.line || issue.line < 1 || !issue.file) {
+            unpostedViolations.push(issue);
             continue;
+        }
         const lineMap = fileLineMaps.get(issue.file);
-        if (!lineMap)
+        if (!lineMap) {
+            core.warning(`No patch found for ${issue.file}, skipping inline comment`);
+            unpostedViolations.push(issue);
             continue;
+        }
         const position = lineMap.get(issue.line);
-        if (position === undefined)
+        if (position === undefined) {
+            core.warning(`Line ${issue.line} not found in diff for ${issue.file}, skipping inline comment`);
+            unpostedViolations.push(issue);
             continue;
+        }
         comments.push({
             path: issue.file,
-            line: position,
+            position: position,
             body: formatInlineComment(issue),
         });
     }
-    // Build review body with violation count and good practice details
-    const body = formatReviewBody(violations, goodPractices);
+    core.info(`Prepared ${comments.length} inline comments, ${unpostedViolations.length} violations without position`);
+    // Build review body
+    const body = formatReviewBody(violations, goodPractices, unpostedViolations);
     const { data: review } = await octokit.rest.pulls.createReview({
         owner,
         repo,
         pull_number: prNumber,
         commit_id: headSha,
-        event: comments.length > 0 ? 'REQUEST_CHANGES' : 'COMMENT',
+        event: 'COMMENT',
         body,
-        comments: comments.map(c => ({
-            path: c.path,
-            line: c.line,
-            body: c.body,
-        })),
+        comments,
     });
     core.info(`Created review with ${comments.length} inline comments`);
-    return { reviewId: review.id, postedInlineCount: comments.length };
+    return { reviewId: review.id, postedInlineCount: comments.length, unpostedViolations };
 }
-function formatReviewBody(violations, goodPractices) {
+function formatReviewBody(violations, goodPractices, unpostedViolations) {
     const sections = ['## ♿ Accessibility Review', ''];
-    // Summary line
-    if (violations.length === 0 && goodPractices.length === 0) {
+    const totalViolations = violations.length;
+    const totalGoodPractices = goodPractices.length;
+    if (totalViolations === 0 && totalGoodPractices === 0) {
         sections.push('✅ **No issues found.**');
         sections.push('');
         sections.push('The code appears to follow WCAG 2.2 guidelines.');
     }
     else {
         const parts = [];
-        if (violations.length > 0)
-            parts.push(`🔴 **${violations.length} violation${violations.length !== 1 ? 's' : ''}**`);
-        if (goodPractices.length > 0)
-            parts.push(`🟢 **${goodPractices.length} good practice${goodPractices.length !== 1 ? 's' : ''}**`);
+        if (totalViolations > 0) {
+            parts.push(`🔴 **${totalViolations} violation${totalViolations !== 1 ? 's' : ''}**`);
+        }
+        if (totalGoodPractices > 0) {
+            parts.push(`🟢 **${totalGoodPractices} good practice${totalGoodPractices !== 1 ? 's' : ''}**`);
+        }
         sections.push(`**Found:** ${parts.join(' · ')}`);
         sections.push('');
+        // Violations posted as inline comments
         if (violations.length > 0) {
+            const postedCount = violations.length - unpostedViolations.length;
             sections.push('---');
             sections.push('');
             sections.push('### ⚠️ Violations');
             sections.push('');
-            sections.push('These issues **must be fixed** to meet WCAG 2.2 requirements.');
-            sections.push('');
-            sections.push(`See the **${violations.length} inline comment${violations.length !== 1 ? 's' : ''}** above for details.`);
-            sections.push('');
+            if (postedCount > 0) {
+                sections.push(`See the **${postedCount} inline comment${postedCount !== 1 ? 's' : ''}** above for details.`);
+                sections.push('');
+            }
+            // Violations without inline position go in body
+            if (unpostedViolations.length > 0) {
+                sections.push(`**${unpostedViolations.length} violation${unpostedViolations.length !== 1 ? 's' : ''} without inline comments:**`);
+                sections.push('');
+                for (const issue of unpostedViolations) {
+                    const location = (issue.file || 'Unknown') + (issue.line ? `:${issue.line}` : '');
+                    sections.push(`- **${location}** - ${issue.title || 'Accessibility violation'}`);
+                    if (issue.wcag_criterion) {
+                        sections.push(`  - WCAG ${issue.wcag_criterion} (Level ${issue.wcag_level || 'A'})`);
+                    }
+                }
+                sections.push('');
+            }
         }
+        // Good practices section
         if (goodPractices.length > 0) {
             sections.push('---');
             sections.push('');
             sections.push('### 🟢 Good Practices');
             sections.push('');
-            sections.push('These are **recommended improvements** that enhance accessibility but are not required.');
+            sections.push('These accessibility improvements are **recommended** to enhance UX:');
             sections.push('');
             for (const issue of goodPractices) {
                 if (!issue)
@@ -32902,29 +32927,32 @@ const SYSTEM_PROMPT = `You are an expert WCAG 2.2 accessibility auditor. Your ta
 ## Severity Classification (ONLY TWO LEVELS)
 
 🔴 **VIOLATION** - WCAG 2.2 failures that MUST be fixed:
+Any code that does not meet WCAG 2.2 Level A or AA success criteria. These are blocking issues that prevent users with disabilities from accessing content or functionality.
+
+Examples:
 - Missing alt text on meaningful images
 - Form inputs without labels or accessible names
 - Keyboard traps or impossible keyboard navigation
-- Missing focus indicators (outline removed without alternative)
-- Interactive elements without accessible names
-- Color contrast below WCAG requirements (4.5:1 normal text, 3:1 large text)
+- Missing or invisible focus indicators
+- Color contrast below requirements (4.5:1 normal text, 3:1 large text)
 - Links with unclear purpose ("click here", "read more")
-- Missing form field instructions or error messages
 - Duplicate IDs breaking assistive technology
-- Missing lang attribute on HTML element
+- Missing lang attribute on HTML
 - Tables without proper headers
-- Auto-playing media without controls
-- Focus order not matching visual order
+- Interactive elements without accessible names
 - ARIA roles used incorrectly
 
-🟢 **GOOD_PRACTICE** - Accessibility improvements that enhance UX:
-- Missing landmark regions (main, nav, aside)
-- Improper heading hierarchy (skipping levels)
-- Suboptimal focus visibility (present but could be clearer)
-- Long link texts that could be shortened
-- Redundant ARIA labels
-- Title attributes on links when text is already clear
-- Missing skip links (not required but recommended)
+🟢 **GOOD_PRACTICE** - Accessibility improvements that SHOULD be implemented:
+Recommended practices that improve accessibility beyond minimum WCAG requirements. These are not violations but implementing them would enhance the user experience for people with disabilities.
+
+Examples:
+- Missing landmark regions (main, nav, aside) - improves navigation
+- Minor heading hierarchy issues - improves screen reader experience
+- Focus visible but could be more prominent - better visibility
+- Long link texts that could be more descriptive
+- Missing skip links - improves keyboard navigation
+- Redundant ARIA when semantics already convey meaning
+- Suboptimal alt text that could be more descriptive
 
 ## Response Format
 

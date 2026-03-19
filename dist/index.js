@@ -32703,10 +32703,13 @@ async function analyzeFilesInBatches(files, llmBackend, apiKey, model, ollamaUrl
             if (!file.patch)
                 continue;
             diffLines.push(`=== ${file.filename} ===`);
-            for (const line of file.patch.split('\n')) {
-                if (line.startsWith('+') && !line.startsWith('+++')) {
-                    diffLines.push(line.substring(1));
-                }
+            const patchLines = file.patch.split('\n');
+            for (const line of patchLines) {
+                if (line.startsWith('+++'))
+                    continue;
+                if (line.startsWith('-'))
+                    continue;
+                diffLines.push(line);
             }
             diffLines.push('');
         }

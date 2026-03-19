@@ -1,5 +1,6 @@
 import { GoogleGenerativeAI, SchemaType } from '@google/generative-ai';
 import { A11yIssue } from '../state/types';
+import { getSystemPrompt } from '../prompts';
 
 interface AnalysisResult {
   issues: A11yIssue[];
@@ -41,8 +42,12 @@ export class GeminiClient {
       required: ['issues', 'summary'],
     };
 
+    const systemInstruction = getSystemPrompt();
+    const fullUserPrompt = `${prompt}\n\n---\n\n## Code Diff:\n\n${diffContent}`;
+
     const genModel = this.client.getGenerativeModel({
       model: this.model,
+      systemInstruction,
       generationConfig: {
         temperature: 0.1,
         responseMimeType: 'application/json',
@@ -50,10 +55,8 @@ export class GeminiClient {
       },
     });
 
-    const fullPrompt = `${prompt}\n\n---\n\n## Code Diff:\n\n${diffContent}`;
-
     try {
-      const result = await genModel.generateContent(fullPrompt);
+      const result = await genModel.generateContent(fullUserPrompt);
       const text = result.response.text();
       
       const parsed = JSON.parse(text);

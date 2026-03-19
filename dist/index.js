@@ -32746,6 +32746,7 @@ async function analyzeFilesInBatches(files, llmBackend, apiKey, model, ollamaUrl
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.GeminiClient = void 0;
 const generative_ai_1 = __nccwpck_require__(7656);
+const prompts_1 = __nccwpck_require__(831);
 class GeminiClient {
     client;
     model;
@@ -32778,17 +32779,19 @@ class GeminiClient {
             },
             required: ['issues', 'summary'],
         };
+        const systemInstruction = (0, prompts_1.getSystemPrompt)();
+        const fullUserPrompt = `${prompt}\n\n---\n\n## Code Diff:\n\n${diffContent}`;
         const genModel = this.client.getGenerativeModel({
             model: this.model,
+            systemInstruction,
             generationConfig: {
                 temperature: 0.1,
                 responseMimeType: 'application/json',
                 responseSchema: schema,
             },
         });
-        const fullPrompt = `${prompt}\n\n---\n\n## Code Diff:\n\n${diffContent}`;
         try {
-            const result = await genModel.generateContent(fullPrompt);
+            const result = await genModel.generateContent(fullUserPrompt);
             const text = result.response.text();
             const parsed = JSON.parse(text);
             const issues = (parsed.issues || []).map((issue) => {
@@ -32828,6 +32831,7 @@ exports.GeminiClient = GeminiClient;
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.OllamaClient = void 0;
 const ollama_1 = __nccwpck_require__(8338);
+const prompts_1 = __nccwpck_require__(831);
 class OllamaClient {
     ollama;
     model;
@@ -32844,12 +32848,14 @@ class OllamaClient {
         this.ollama = new ollama_1.Ollama(config);
     }
     async analyze(diffContent, prompt) {
-        const fullPrompt = `${prompt}\n\n---\n\n## Code Diff:\n\n${diffContent}\n\nRespond with valid JSON only.`;
+        const systemPrompt = (0, prompts_1.getSystemPrompt)();
+        const fullUserPrompt = `${prompt}\n\n---\n\n## Code Diff:\n\n${diffContent}`;
         try {
             const response = await this.ollama.chat({
                 model: this.model,
                 messages: [
-                    { role: 'user', content: fullPrompt }
+                    { role: 'system', content: systemPrompt },
+                    { role: 'user', content: fullUserPrompt }
                 ],
                 format: 'json',
                 options: {

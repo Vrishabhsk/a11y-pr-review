@@ -1,5 +1,6 @@
 import { Ollama } from 'ollama';
 import { A11yIssue } from '../state/types';
+import { getSystemPrompt } from '../prompts';
 
 interface AnalysisResult {
   issues: A11yIssue[];
@@ -27,13 +28,15 @@ export class OllamaClient {
   }
 
   async analyze(diffContent: string, prompt: string): Promise<AnalysisResult> {
-    const fullPrompt = `${prompt}\n\n---\n\n## Code Diff:\n\n${diffContent}\n\nRespond with valid JSON only.`;
+    const systemPrompt = getSystemPrompt();
+    const fullUserPrompt = `${prompt}\n\n---\n\n## Code Diff:\n\n${diffContent}`;
 
     try {
       const response = await this.ollama.chat({
         model: this.model,
         messages: [
-          { role: 'user', content: fullPrompt }
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: fullUserPrompt }
         ],
         format: 'json',
         options: {

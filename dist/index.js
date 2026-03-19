@@ -32322,8 +32322,9 @@ function formatInlineComment(issue) {
     ];
     if (issue.suggestion && issue.suggestion.trim()) {
         const trimmedSuggestion = issue.suggestion.trim();
-        const isCodeSuggestion = isLikelyCode(trimmedSuggestion);
-        if (isCodeSuggestion) {
+        const isStyleIssue = isStyleRelatedIssue(issue);
+        const canBeInlineSuggestion = !isStyleIssue && isLikelyCode(trimmedSuggestion);
+        if (canBeInlineSuggestion) {
             lines.push('');
             lines.push('**Suggested fix:**');
             lines.push('```suggestion');
@@ -32337,6 +32338,26 @@ function formatInlineComment(issue) {
     }
     return lines.join('\n');
 }
+function isStyleRelatedIssue(issue) {
+    const styleKeywords = [
+        'contrast', 'color', 'padding', 'margin', 'outline', 'font-size',
+        'font-weight', 'line-height', 'background', 'border', 'width', 'height',
+        'display', 'visibility', 'opacity', 'z-index', 'position', 'top', 'left',
+        'right', 'bottom', 'overflow', 'cursor', 'focus indicator', 'focus visible',
+    ];
+    const titleLower = (issue.title || '').toLowerCase();
+    const descLower = (issue.description || '').toLowerCase();
+    const suggestionLower = (issue.suggestion || '').toLowerCase();
+    const wcagLower = (issue.wcag_criterion || '').toLowerCase();
+    const combinedText = `${titleLower} ${descLower} ${suggestionLower} ${wcagLower}`;
+    let matchCount = 0;
+    for (const keyword of styleKeywords) {
+        if (combinedText.includes(keyword)) {
+            matchCount++;
+        }
+    }
+    return matchCount >= 2;
+}
 function isLikelyCode(text) {
     const codeIndicators = [
         '<', '>', '{', '}', '()', '=>', 'function', 'const ', 'let ', 'var ',
@@ -32344,7 +32365,6 @@ function isLikelyCode(text) {
         '=>', '->', '===', '!==', '==', '!=', '&&', '||', ';', '=>',
         'aria-', 'data-', 'src=', 'href=', 'class=', 'id=', 'style=',
         'input', 'button', 'div', 'span', 'form', 'label', 'img', 'a ',
-        'outline:', 'padding:', 'margin:', 'color:', 'background:',
     ];
     const lowerText = text.toLowerCase();
     let matchCount = 0;

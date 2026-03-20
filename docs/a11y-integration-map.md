@@ -221,21 +221,6 @@ The LLM is instructed to check for these WCAG criteria:
 | `violations` | VIOLATION count |
 | `good-practices` | GOOD_PRACTICE count |
 
-### 5.3 Quarterly Health Report Data
-
-To generate quarterly reports, extract from GitHub API:
-
-```bash
-# Get all PR reviews from a time period
-gh api repos/{owner}/{repo}/pulls/{pull_number}/reviews
-
-# Get check run status for a11y reviews
-gh api repos/{owner}/{repo}/commits/{sha}/check-runs
-
-# Filter for failed checks (violations found)
-gh api repos/{owner}/{repo}/check-runs --jq '.check_runs[] | select(.name == "a11y-pr-review") | {status: .status, conclusion: .conclusion, violations: .output.summary}'
-```
-
 ---
 
 ## 6. Troubleshooting Guide

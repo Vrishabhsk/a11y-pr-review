@@ -58,15 +58,6 @@ jobs:
           fail-on-issues: true
 ```
 
-### Available Gemini Models
-
-| Model | Description | Best For |
-|-------|-------------|----------|
-| `gemini-2.0-flash` | **Recommended** - Fast, cost-effective | Most PRs |
-| `gemini-2.5-flash-lite` | Cheapest, lower quality | Large diffs |
-| `gemini-2.5-flash` | Balanced | Complex issues |
-| `gemini-2.5-pro` | Highest quality, slower | Critical apps |
-
 ### Gemini-Specific Notes
 
 - **Rate Limits**: Varies by tier (Free: 15 req/min, Paid: higher)
@@ -99,14 +90,7 @@ Name: OLLAMA_API_KEY
 Secret: <your-ollama-cloud-api-key>
 ```
 
-### Recommended Ollama Cloud Models
-
-| Model | Description | Best For |
-|-------|-------------|----------|
-| `qwen2.5-coder:32b` | **Recommended** - Code-focused | Accessibility review |
-| `qwen2.5-coder:14b` | Lighter version | Faster analysis |
-| `llama3.1:8b` | General purpose | Simple issues |
-| `mixtral:8x7b` | High quality | Complex analysis |
+### Recommended Ollama Cloud Models : glm-5:cloud and minimax-m2.7:cloud
 
 ### Workflow Configuration
 
@@ -155,7 +139,7 @@ jobs:
 | Use Case | Recommended Backend |
 |----------|-------------------|
 | Quick setup, small teams | **Gemini** |
-| Code-focused analysis | **Ollama Cloud (qwen2.5-coder)** |
+| Code-focused analysis | **Ollama Cloud ** |
 | No infrastructure management | Either |
 
 ---

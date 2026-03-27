@@ -5,6 +5,7 @@ import { buildPrompt } from './prompts';
 import { A11yIssue, MAX_ISSUES } from './state/types';
 import { getPRInfo, getPRFiles, createReview } from './github/client';
 import { createOrUpdateComment, formatIssueComment, formatNoIssuesComment, formatDraftSkipComment } from './github/comments';
+import { createAccessibilityCheckRun } from './github/checks';
 
 type Octokit = ReturnType<typeof github.getOctokit>;
 
@@ -18,6 +19,7 @@ async function run(): Promise<void> {
     const model = core.getInput('model') || (llmBackend === 'gemini' ? 'gemini-2.0-flash' : 'qwen2.5-coder:32b');
     const ollamaUrl = core.getInput('ollama-url') || 'http://localhost:11434';
     const failOnIssues = core.getInput('fail-on-issues').toLowerCase() !== 'false';
+    const outputMode = core.getInput('output-mode').toLowerCase() || 'comments';
 
     // Validate API key requirements
     if (llmBackend === 'gemini' && !apiKey) {
@@ -107,37 +109,27 @@ async function run(): Promise<void> {
       }
     }
 
-    // Post results
-    if (violations.length > 0) {
-      core.info(`Posting ${violations.length} VIOLATION issues as inline comments`);
+    // Post results based on output mode
+    if (outputMode === 'checks') {
+      core.info('Posting results as Check Run with annotations');
       
       try {
-        const reviewResult = await createReview(
+        const checkResult = await createAccessibilityCheckRun(
           octokit,
           owner,
           repo,
-          prNumber,
           prInfo.headSha,
           violations,
-          goodPractices,
-          filePatches
+          goodPractices
         );
-        
-        core.info(`Posted ${reviewResult.postedInlineCount} inline comments`);
+        core.info(`Created Check Run #${checkResult.checkRunId} with ${checkResult.annotationCount} annotations`);
       } catch (error) {
-        core.warning(`Failed to create review: ${error instanceof Error ? error.message : String(error)}`);
-        // Fallback to PR comment
-        const comment = formatIssueComment(issues);
-        await createOrUpdateComment(octokit, owner, repo, prNumber, comment);
+        core.warning(`Failed to create Check Run: ${error instanceof Error ? error.message : String(error)}`);
+        core.warning('Falling back to PR comments');
+        await postAsComments(octokit, owner, repo, prNumber, prInfo.headSha, violations, goodPractices, issues, filePatches);
       }
-    } else if (issues.length > 0) {
-      // Only good practices - post as comment
-      core.info('Only GOOD_PRACTICE issues found, posting as PR comment');
-      const comment = formatIssueComment(issues);
-      await createOrUpdateComment(octokit, owner, repo, prNumber, comment);
     } else {
-      core.info('No issues found');
-      await createOrUpdateComment(octokit, owner, repo, prNumber, formatNoIssuesComment());
+      await postAsComments(octokit, owner, repo, prNumber, prInfo.headSha, violations, goodPractices, issues, filePatches);
     }
 
     // Set output
@@ -163,6 +155,50 @@ async function run(): Promise<void> {
     if (error instanceof Error && error.stack) {
       core.debug(`Stack trace: ${error.stack}`);
     }
+  }
+}
+
+async function postAsComments(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  prNumber: number,
+  headSha: string,
+  violations: A11yIssue[],
+  goodPractices: A11yIssue[],
+  issues: A11yIssue[],
+  filePatches: Map<string, string>
+): Promise<void> {
+  if (violations.length > 0) {
+    core.info(`Posting ${violations.length} VIOLATION issues as inline comments`);
+    
+    try {
+      const reviewResult = await createReview(
+        octokit,
+        owner,
+        repo,
+        prNumber,
+        headSha,
+        violations,
+        goodPractices,
+        filePatches
+      );
+      
+      core.info(`Posted ${reviewResult.postedInlineCount} inline comments`);
+    } catch (error) {
+      core.warning(`Failed to create review: ${error instanceof Error ? error.message : String(error)}`);
+      // Fallback to PR comment
+      const comment = formatIssueComment(issues);
+      await createOrUpdateComment(octokit, owner, repo, prNumber, comment);
+    }
+  } else if (issues.length > 0) {
+    // Only good practices - post as comment
+    core.info('Only GOOD_PRACTICE issues found, posting as PR comment');
+    const comment = formatIssueComment(issues);
+    await createOrUpdateComment(octokit, owner, repo, prNumber, comment);
+  } else {
+    core.info('No issues found');
+    await createOrUpdateComment(octokit, owner, repo, prNumber, formatNoIssuesComment());
   }
 }
 

@@ -41,6 +41,13 @@ inputs:
     description: 'Fail the action if WCAG 2.2 VIOLATION issues are found (GOOD_PRACTICE does not fail)'
     required: false
     default: 'true'
+  output-mode:
+    description: |
+      How to output accessibility review results:
+      - "comments" (default): PR inline comments + summary comment
+      - "checks": Check Run with annotations (keeps PR thread clean)
+    required: false
+    default: 'comments'
 
 outputs:
   issues-found:

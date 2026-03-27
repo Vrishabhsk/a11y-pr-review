@@ -32058,6 +32058,183 @@ function wrappy (fn, cb) {
 
 /***/ }),
 
+/***/ 6250:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.createAccessibilityCheckRun = createAccessibilityCheckRun;
+exports.formatCheckNoIssuesSummary = formatCheckNoIssuesSummary;
+const core = __importStar(__nccwpck_require__(7484));
+const CHECK_NAME = 'Accessibility Review';
+const MAX_ANNOTATIONS = 50;
+async function createAccessibilityCheckRun(octokit, owner, repo, headSha, violations, goodPractices) {
+    core.info(`Creating Check Run for ${headSha}`);
+    const { data: checkRun } = await octokit.rest.checks.create({
+        owner,
+        repo,
+        name: CHECK_NAME,
+        head_sha: headSha,
+        status: 'in_progress',
+        started_at: new Date().toISOString(),
+    });
+    const checkRunId = checkRun.id;
+    core.info(`Created Check Run #${checkRunId}`);
+    const allIssues = [...violations, ...goodPractices];
+    const annotations = buildAnnotations(allIssues);
+    const annotationCount = Math.min(annotations.length, MAX_ANNOTATIONS);
+    const totalIssues = allIssues.length;
+    const truncated = totalIssues > MAX_ANNOTATIONS;
+    const conclusion = violations.length > 0 ? 'failure' : 'success';
+    const summary = formatCheckSummary(violations, goodPractices, truncated);
+    core.info(`Updating Check Run with ${annotationCount} annotations (conclusion: ${conclusion})`);
+    await octokit.rest.checks.update({
+        owner,
+        repo,
+        check_run_id: checkRunId,
+        status: 'completed',
+        completed_at: new Date().toISOString(),
+        conclusion,
+        output: {
+            title: CHECK_NAME,
+            summary,
+            annotations: annotations.slice(0, MAX_ANNOTATIONS),
+        },
+    });
+    if (truncated) {
+        core.info(`Note: ${totalIssues - MAX_ANNOTATIONS} issues not shown due to GitHub annotation limit`);
+    }
+    return { checkRunId, annotationCount };
+}
+function buildAnnotations(issues) {
+    const annotations = [];
+    for (const issue of issues) {
+        if (!issue || !issue.file)
+            continue;
+        const line = issue.line && issue.line > 0 ? issue.line : 1;
+        const annotationLevel = issue.severity === 'VIOLATION' ? 'failure' : 'notice';
+        const title = issue.wcag_criterion
+            ? `WCAG ${issue.wcag_criterion} (Level ${issue.wcag_level || 'A'})`
+            : 'Accessibility Issue';
+        const message = issue.title || 'Accessibility issue found';
+        let rawDetails = '';
+        if (issue.description) {
+            rawDetails += issue.description;
+        }
+        if (issue.suggestion) {
+            if (rawDetails)
+                rawDetails += '\n\n';
+            rawDetails += `Suggested fix: ${issue.suggestion}`;
+        }
+        annotations.push({
+            path: issue.file,
+            start_line: line,
+            end_line: line,
+            annotation_level: annotationLevel,
+            message,
+            title,
+            raw_details: rawDetails || undefined,
+        });
+    }
+    return annotations;
+}
+function formatCheckSummary(violations, goodPractices, truncated) {
+    const sections = [];
+    const violationCount = violations.length;
+    const goodPracticeCount = goodPractices.length;
+    const total = violationCount + goodPracticeCount;
+    if (total === 0) {
+        sections.push('✅ **No issues found.**');
+        sections.push('');
+        sections.push('The code appears to follow WCAG 2.2 guidelines.');
+        return sections.join('\n');
+    }
+    const parts = [];
+    if (violationCount > 0) {
+        parts.push(`🔴 **${violationCount} violation${violationCount !== 1 ? 's' : ''}**`);
+    }
+    if (goodPracticeCount > 0) {
+        parts.push(`🟢 **${goodPracticeCount} good practice${goodPracticeCount !== 1 ? 's' : ''}**`);
+    }
+    sections.push(`**Found:** ${parts.join(' · ')}`);
+    sections.push('');
+    if (truncated) {
+        sections.push(`⚠️ Showing ${MAX_ANNOTATIONS} of ${total} issues (GitHub annotation limit)`);
+        sections.push('');
+    }
+    if (violationCount > 0) {
+        sections.push('---');
+        sections.push('');
+        sections.push('### ⚠️ Violations (must fix)');
+        sections.push('');
+        sections.push('These issues **must be fixed** to meet WCAG 2.2 requirements.');
+        sections.push('');
+        sections.push('See annotations above for details.');
+    }
+    if (goodPracticeCount > 0) {
+        sections.push('---');
+        sections.push('');
+        sections.push('### 🟢 Good Practices (recommended)');
+        sections.push('');
+        sections.push('These improvements are **recommended** to enhance accessibility.');
+        sections.push('');
+        sections.push('See annotations above for details.');
+    }
+    sections.push('');
+    sections.push('---');
+    sections.push('*🤖 Generated by WCAG 2.2 Accessibility Review*');
+    return sections.join('\n');
+}
+function formatCheckNoIssuesSummary() {
+    return [
+        '## ✅ Accessibility Review',
+        '',
+        '**No issues found.**',
+        '',
+        'The code appears to follow WCAG 2.2 guidelines.',
+        '',
+        '---',
+        '*🤖 Generated by WCAG 2.2 Accessibility Review*',
+    ].join('\n');
+}
+
+
+/***/ }),
+
 /***/ 6584:
 /***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
 
@@ -32562,6 +32739,7 @@ const prompts_1 = __nccwpck_require__(831);
 const types_1 = __nccwpck_require__(9520);
 const client_1 = __nccwpck_require__(6584);
 const comments_1 = __nccwpck_require__(6645);
+const checks_1 = __nccwpck_require__(6250);
 async function run() {
     try {
         core.info('Starting accessibility review...');
@@ -32571,6 +32749,7 @@ async function run() {
         const model = core.getInput('model') || (llmBackend === 'gemini' ? 'gemini-2.0-flash' : 'qwen2.5-coder:32b');
         const ollamaUrl = core.getInput('ollama-url') || 'http://localhost:11434';
         const failOnIssues = core.getInput('fail-on-issues').toLowerCase() !== 'false';
+        const outputMode = core.getInput('output-mode').toLowerCase() || 'comments';
         // Validate API key requirements
         if (llmBackend === 'gemini' && !apiKey) {
             core.setFailed('api-key is required for Gemini backend');
@@ -32634,29 +32813,21 @@ async function run() {
                 filePatches.set(file.filename, file.patch);
             }
         }
-        // Post results
-        if (violations.length > 0) {
-            core.info(`Posting ${violations.length} VIOLATION issues as inline comments`);
+        // Post results based on output mode
+        if (outputMode === 'checks') {
+            core.info('Posting results as Check Run with annotations');
             try {
-                const reviewResult = await (0, client_1.createReview)(octokit, owner, repo, prNumber, prInfo.headSha, violations, goodPractices, filePatches);
-                core.info(`Posted ${reviewResult.postedInlineCount} inline comments`);
+                const checkResult = await (0, checks_1.createAccessibilityCheckRun)(octokit, owner, repo, prInfo.headSha, violations, goodPractices);
+                core.info(`Created Check Run #${checkResult.checkRunId} with ${checkResult.annotationCount} annotations`);
             }
             catch (error) {
-                core.warning(`Failed to create review: ${error instanceof Error ? error.message : String(error)}`);
-                // Fallback to PR comment
-                const comment = (0, comments_1.formatIssueComment)(issues);
-                await (0, comments_1.createOrUpdateComment)(octokit, owner, repo, prNumber, comment);
+                core.warning(`Failed to create Check Run: ${error instanceof Error ? error.message : String(error)}`);
+                core.warning('Falling back to PR comments');
+                await postAsComments(octokit, owner, repo, prNumber, prInfo.headSha, violations, goodPractices, issues, filePatches);
             }
         }
-        else if (issues.length > 0) {
-            // Only good practices - post as comment
-            core.info('Only GOOD_PRACTICE issues found, posting as PR comment');
-            const comment = (0, comments_1.formatIssueComment)(issues);
-            await (0, comments_1.createOrUpdateComment)(octokit, owner, repo, prNumber, comment);
-        }
         else {
-            core.info('No issues found');
-            await (0, comments_1.createOrUpdateComment)(octokit, owner, repo, prNumber, (0, comments_1.formatNoIssuesComment)());
+            await postAsComments(octokit, owner, repo, prNumber, prInfo.headSha, violations, goodPractices, issues, filePatches);
         }
         // Set output
         core.setOutput('issues-found', String(issues.length));
@@ -32680,6 +32851,31 @@ async function run() {
         if (error instanceof Error && error.stack) {
             core.debug(`Stack trace: ${error.stack}`);
         }
+    }
+}
+async function postAsComments(octokit, owner, repo, prNumber, headSha, violations, goodPractices, issues, filePatches) {
+    if (violations.length > 0) {
+        core.info(`Posting ${violations.length} VIOLATION issues as inline comments`);
+        try {
+            const reviewResult = await (0, client_1.createReview)(octokit, owner, repo, prNumber, headSha, violations, goodPractices, filePatches);
+            core.info(`Posted ${reviewResult.postedInlineCount} inline comments`);
+        }
+        catch (error) {
+            core.warning(`Failed to create review: ${error instanceof Error ? error.message : String(error)}`);
+            // Fallback to PR comment
+            const comment = (0, comments_1.formatIssueComment)(issues);
+            await (0, comments_1.createOrUpdateComment)(octokit, owner, repo, prNumber, comment);
+        }
+    }
+    else if (issues.length > 0) {
+        // Only good practices - post as comment
+        core.info('Only GOOD_PRACTICE issues found, posting as PR comment');
+        const comment = (0, comments_1.formatIssueComment)(issues);
+        await (0, comments_1.createOrUpdateComment)(octokit, owner, repo, prNumber, comment);
+    }
+    else {
+        core.info('No issues found');
+        await (0, comments_1.createOrUpdateComment)(octokit, owner, repo, prNumber, (0, comments_1.formatNoIssuesComment)());
     }
 }
 run();
